@@ -785,3 +785,506 @@ def generate_subtitle_output_name(original_path, mode="bilingual",
         ext = ".txt"
 
     return f"{basename}-{lang_suffix}-agent{mode_str}{ext}"
+# ═══════════════════════════════════════════════════════════
+# 兼容别名（供 gui.py 调用）
+# ═══════════════════════════════════════════════════════════
+parse_subtitle_file = read_subtitle_file
+
+
+def export_subtitle_file(subtitle, output_path, output_mode="bilingual", output_format=None):
+    """兼容接口：导出字幕文件，output_format 由文件扩展名自动判断"""
+    return export_subtitle(subtitle, output_path, mode=output_mode)
+# ═══════════════════════════════════════════════════════════
+# 字幕视频适配优化
+# ═══════════════════════════════════════════════════════════
+
+def _count_cjk(text):
+    """统计中日韩字符数"""
+    return sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u309f' or '\u30a0' <= c <= '\u30ff')
+
+
+def _is_cjk_dominant(text):
+    """判断文本是否以中日韩文字为主"""
+    cjk = _count_cjk(text)
+    return cjk > len(text) * 0.3
+
+
+def _smart_line_break(text, max_chars=42, is_cjk=False):
+    """
+    智能换行：在自然停顿处断行
+    返回最多2行，每行不超过 max_chars
+    """
+    if len(text) <= max_chars:
+        return text
+
+    if is_cjk:
+        max_chars = min(max_chars, 20)
+    else:
+        max_chars = min(max_chars, 42)
+
+    if len(text) <= max_chars:
+        return text
+
+    # 优先在标点处断行
+    break_chars_cjk = "，。！？；：、""''）】》"
+    break_chars_en = ",.!?;:)'\"}]>"
+    break_chars = break_chars_cjk + break_chars_en
+
+    best_pos = -1
+    for i, c in enumerate(text):
+        if c in break_chars and i < len(text) - 1:
+            # CJK: 断在标点后面
+            if c in break_chars_cjk:
+                best_pos = i + 1
+            # EN: 断在标点后面（空格处）
+            elif c in break_chars_en:
+                best_pos = i + 1
+
+        if best_pos > 0 and best_pos >= max_chars * 0.6:
+            break
+
+    if best_pos < 0:
+        # 没有标点，按字数对半切
+        mid = len(text) // 2
+        # 找最近的空格
+        space_pos = text.rfind(' ', 0, mid + 5)
+        if space_pos > len(text) * 0.3:
+            best_pos = space_pos + 1
+        else:
+            best_pos = mid
+
+    line1 = text[:best_pos].strip()
+    line2 = text[best_pos:].strip()
+
+    # 如果第二行仍然太长，强制截断
+    if len(line2) > max_chars and not is_cjk:
+        line2 = line2[:max_chars - 3] + "..."
+
+    return line1 + "\n" + line2
+
+
+def _ms_from_srt(time_str):
+    """SRT 时间字符串 -> 毫秒"""
+    try:
+        time_str = time_str.strip()
+        if ',' in time_str:
+            h, m, s_ms = time_str.split(":")
+            s, ms = s_ms.split(",")
+            return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+        else:
+            h, m, s_ms = time_str.split(":")
+            s, ms = s_ms.split(".")
+            return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+    except Exception:
+        return 0
+
+
+def _ms_to_srt(ms):
+    """毫秒 -> SRT 时间字符串"""
+    ms = max(0, int(ms))
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    ms_r = ms % 1000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms_r:03d}"
+
+
+def _ms_to_vtt(ms):
+    """毫秒 -> VTT 时间字符串"""
+    ms = max(0, int(ms))
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    ms_r = ms % 1000
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms_r:03d}"
+    return f"{m:02d}:{s:02d}.{ms_r:03d}"
+
+
+def _ms_to_ass(ms):
+    """毫秒 -> ASS 时间字符串"""
+    ms = max(0, int(ms))
+    h = ms // 3600000
+    ms %= 3600000
+    m = ms // 60000
+    ms %= 60000
+    s = ms // 1000
+    cs = (ms % 1000) // 10
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
+def optimize_subtitle_for_video(subtitle, target_cps=15, max_lines=2,
+                                 min_duration_ms=1000, max_duration_ms=7000,
+                                 min_gap_ms=200):
+    """
+    优化字幕以适配视频播放
+
+    Args:
+        subtitle: SubtitleFile 对象
+        target_cps: 目标每秒字符数（中文15，英文25）
+        max_lines: 每条字幕最大行数（默认2行）
+        min_duration_ms: 最短显示时长（毫秒，默认1000）
+        max_duration_ms: 最长显示时长（毫秒，默认7000）
+        min_gap_ms: 条目之间最短间隔（毫秒，默认200）
+
+    Returns:
+        优化后的 SubtitleFile 对象
+    """
+    if not subtitle or not subtitle.entries:
+        return subtitle
+
+    entries = subtitle.entries
+    total = len(entries)
+
+    for i, entry in enumerate(entries):
+        # 使用译文（如有），否则用原文
+        text = entry.translated if entry.translated else entry.text
+        if not text.strip():
+            continue
+
+        is_cjk = _is_cjk_dominant(text)
+        cps = target_cps if is_cjk else 25
+
+        # 1. 智能换行
+        optimized_text = _smart_line_break(text, max_chars=20 if is_cjk else 42, is_cjk=is_cjk)
+        if entry.translated:
+            entry.translated = optimized_text
+        else:
+            entry.text = optimized_text
+
+        # 重新获取换行后的文本长度用于时长计算
+        display_text = optimized_text
+        char_count = len(display_text.replace("\n", ""))
+
+        # 2. 根据文本长度计算最佳时长
+        # 时长 = 字符数 / CPS，但受限于最短和最长
+        optimal_ms = int(char_count / cps * 1000)
+        optimal_ms = max(min_duration_ms, min(optimal_ms, max_duration_ms))
+
+        # 3. 解析当前时间
+        start_ms = _ms_from_srt(entry.start_time)
+        end_ms = _ms_from_srt(entry.end_time)
+        current_duration = end_ms - start_ms
+
+        if current_duration < min_duration_ms:
+            # 时长不足，延长到最优时长
+            end_ms = start_ms + optimal_ms
+        elif current_duration > max_duration_ms:
+            # 时长过长，截断到最长
+            end_ms = start_ms + max_duration_ms
+
+        # 4. 确保与下一条不重叠，留出最小间隔
+        if i < total - 1:
+            next_start_ms = _ms_from_srt(entries[i + 1].start_time)
+            if end_ms + min_gap_ms > next_start_ms and next_start_ms > start_ms:
+                end_ms = next_start_ms - min_gap_ms
+                # 如果调整后时长太短，保持原样
+                if end_ms - start_ms < min_duration_ms:
+                    end_ms = start_ms + min_duration_ms
+
+        # 5. 回写时间
+        entry.start_time = _ms_to_srt(start_ms)
+        entry.end_time = _ms_to_srt(end_ms)
+
+    # 6. 重编号
+    for i, entry in enumerate(entries, start=1):
+        entry.index = i
+
+    # ═══════════════════════════════════════════════════════════
+    # 字幕样式自动调整
+    # ═══════════════════════════════════════════════════════════
+
+    # 预定义样式表：按文本长度自动匹配
+    SUBTITLE_STYLES = {
+        "short": {  # ≤ 10 字符：大号，适合标题/感叹词
+            "fontname": "Microsoft YaHei",
+            "fontsize": 48,
+            "primarycolor": "&H00FFFFFF",  # 白色
+            "secondarycolor": "&H000000FF",  # 黑色
+            "outlinecolor": "&H00000000",  # 黑色描边
+            "backcolor": "&H40000000",  # 半透明黑背景
+            "bold": True,
+            "italic": False,
+            "underline": False,
+            "strikeout": False,
+            "scalex": 100,
+            "scaley": 100,
+            "spacing": 0,
+            "angle": 0,
+            "borderstyle": 1,  # 1=描边+阴影
+            "outline": 3,
+            "shadow": 2,
+            "alignment": 8,  # 底部居中
+            "marginl": 10,
+            "marginr": 10,
+            "marginv": 30,
+        },
+        "medium": {  # 11~25 字符：中号，适合普通对话
+            "fontname": "Microsoft YaHei",
+            "fontsize": 36,
+            "primarycolor": "&H00FFFFFF",
+            "secondarycolor": "&H000000FF",
+            "outlinecolor": "&H00000000",
+            "backcolor": "&H40000000",
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strikeout": False,
+            "scalex": 100,
+            "scaley": 100,
+            "spacing": 0,
+            "angle": 0,
+            "borderstyle": 1,
+            "outline": 2,
+            "shadow": 1,
+            "alignment": 8,
+            "marginl": 10,
+            "marginr": 10,
+            "marginv": 30,
+        },
+        "long": {  # 26~42 字符：小号，适合长句
+            "fontname": "Microsoft YaHei",
+            "fontsize": 28,
+            "primarycolor": "&H00FFFFFF",
+            "secondarycolor": "&H000000FF",
+            "outlinecolor": "&H00000000",
+            "backcolor": "&H40000000",
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strikeout": False,
+            "scalex": 100,
+            "scaley": 100,
+            "spacing": 0,
+            "angle": 0,
+            "borderstyle": 1,
+            "outline": 2,
+            "shadow": 1,
+            "alignment": 8,
+            "marginl": 10,
+            "marginr": 10,
+            "marginv": 30,
+        },
+        "tiny": {  # > 42 字符：最小号
+            "fontname": "Microsoft YaHei",
+            "fontsize": 22,
+            "primarycolor": "&H00FFFFFF",
+            "secondarycolor": "&H000000FF",
+            "outlinecolor": "&H00000000",
+            "backcolor": "&H40000000",
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strikeout": False,
+            "scalex": 100,
+            "scaley": 100,
+            "spacing": 0,
+            "angle": 0,
+            "borderstyle": 1,
+            "outline": 2,
+            "shadow": 1,
+            "alignment": 8,
+            "marginl": 10,
+            "marginr": 10,
+            "marginv": 30,
+        },
+    }
+
+    def _detect_style_name(text, translated=None):
+        """根据文本长度选择样式级别"""
+        display = translated if translated else text
+        display = display.replace("\n", "")
+        char_count = len(display)
+
+        if char_count <= 10:
+            return "short"
+        elif char_count <= 25:
+            return "medium"
+        elif char_count <= 42:
+            return "long"
+        else:
+            return "tiny"
+
+    def _build_ass_styles_section(styles=None):
+        """生成 ASS [V4+ Styles] 段落"""
+        if not styles:
+            styles = SUBTITLE_STYLES
+
+        lines = ["[V4+ Styles]"]
+        lines.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                     "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                     "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                     "Alignment, MarginL, MarginR, MarginV, Encoding")
+
+        for name, s in styles.items():
+            bold = -1 if s["bold"] else 0
+            italic = -1 if s["italic"] else 0
+            lines.append(
+                f"Style: {name},{s['fontname']},{s['fontsize']},"
+                f"{s['primarycolor']},{s['secondarycolor']},"
+                f"{s['outlinecolor']},{s['backcolor']},"
+                f"{bold},{italic},{s['underline']},{s['strikeout']},"
+                f"{s['scalex']},{s['scaley']},{s['spacing']},{s['angle']},"
+                f"{s['borderstyle']},{s['outline']},{s['shadow']},"
+                f"{s['alignment']},{s['marginl']},{s['marginr']},{s['marginv']},1"
+            )
+
+        return "\n".join(lines)
+
+    def apply_auto_style(subtitle):
+        """
+        为每条字幕自动分配样式名称（基于文本长度）
+        修改 entry.style 字段
+        """
+        if not subtitle or not subtitle.entries:
+            return subtitle
+
+        for entry in subtitle.entries:
+            style_name = _detect_style_name(entry.text, entry.translated)
+            entry.style = style_name
+
+        return subtitle
+
+    def build_ass_with_styles(subtitle):
+        """
+        生成带样式的完整 ASS 文件内容
+        包含 [Script Info] + [V4+ Styles] + [Events]
+        """
+        # 确保每条有条目有样式
+        apply_auto_style(subtitle)
+
+        lines = []
+
+        # ── [Script Info] ──
+        lines.append("[Script Info]")
+        lines.append("ScriptType: v4.00+")
+        lines.append("PlayResX: 1920")
+        lines.append("PlayResY: 1080")
+        lines.append("WrapStyle: 0")
+        lines.append("ScaledBorderAndShadow: yes")
+        lines.append("")
+
+        # ── [V4+ Styles] ──
+        lines.append(_build_ass_styles_section())
+        lines.append("")
+
+        # ── [Events] ──
+        lines.append("[Events]")
+        lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
+
+        for entry in subtitle.entries:
+            text = entry.text
+            if entry.translated:
+                text = entry.text + "\\N" + entry.translated
+            text = text.replace("\n", "\\N")
+
+            start = _ms_to_ass(_ms_from_srt(entry.start_time))
+            end = _ms_to_ass(_ms_from_srt(entry.end_time))
+
+            lines.append(
+                f"Dialogue: {entry.layer},{start},{end},"
+                f"{entry.style},,{entry.margin_l},{entry.margin_r},{entry.margin_v},,"
+                f"{text}"
+            )
+
+        return "\n".join(lines) + "\n"
+
+    def build_srt_with_inline_style(subtitle):
+        """
+        生成带内嵌样式的 SRT 文件
+        使用 ASS 兼容标签 {\fs48}{\b1} 等（大部分播放器支持）
+        """
+        lines = []
+
+        for i, entry in enumerate(subtitle.entries):
+            style_name = _detect_style_name(entry.text, entry.translated)
+            fontsize = SUBTITLE_STYLES[style_name]["fontsize"]
+            bold_tag = "\\b1" if SUBTITLE_STYLES[style_name]["bold"] else ""
+
+            start = entry.start_time
+            end = entry.end_time
+
+            # 原文
+            src_text = f"{{\\fs{fontsize}}}{bold_tag}{entry.text}" if entry.text.strip() else ""
+            # 译文
+            tgt_text = ""
+            if entry.translated:
+                tgt_text = f"{{\\fs{fontsize}}}{bold_tag}{entry.translated}"
+
+            lines.append(f"{i + 1}")
+            lines.append(f"{start} --> {end}")
+            if src_text:
+                lines.append(src_text)
+            if tgt_text and tgt_text != src_text:
+                lines.append(tgt_text)
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def build_vtt_with_css_style(subtitle):
+        """
+        生成带 CSS 样式的 VTT 文件
+        使用 STYLE 标签和 class 控制字体大小
+        """
+        lines = ["WEBVTT"]
+
+        # ── CSS 样式 ──
+        lines.append("")
+        lines.append("STYLE")
+        lines.append("::cue {")
+        lines.append("  font-family: 'Microsoft YaHei', sans-serif;")
+        lines.append("  color: white;")
+        lines.append("  text-shadow: 1px 1px 2px black;")
+        lines.append("  background-color: rgba(0,0,0,0.4);")
+        lines.append("  padding: 4px 8px;")
+        lines.append("  border-radius: 4px;")
+        lines.append("}")
+        lines.append("")
+        lines.append("::cue(.short) { font-size: 2.2em; }")
+        lines.append("::cue(.medium) { font-size: 1.6em; }")
+        lines.append("::cue(.long) { font-size: 1.2em; }")
+        lines.append("::cue(.tiny) { font-size: 0.95em; }")
+        lines.append("")
+
+        for entry in subtitle.entries:
+            style_name = _detect_style_name(entry.text, entry.translated)
+            start = _ms_to_vtt(_ms_from_srt(entry.start_time))
+            end = _ms_to_vtt(_ms_from_srt(entry.end_time))
+
+            # 用 voice tag 充当 class
+            tag = f"<v {style_name}>"
+            text = entry.text
+            if entry.translated:
+                text = entry.text + "\n" + entry.translated
+            text = text.replace("\n", "\n" + tag)
+
+            lines.append(f"{start} --> {end}")
+            lines.append(f"{tag}{text}")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    # ── 覆盖原有的导出函数，使其带样式 ──
+
+    def export_ass_styled(subtitle, output_path):
+        """导出带自动样式的 ASS 字幕"""
+        content = build_ass_with_styles(subtitle)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def export_srt_styled(subtitle, output_path):
+        """导出带内嵌样式的 SRT 字幕"""
+        content = build_srt_with_inline_style(subtitle)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def export_vtt_styled(subtitle, output_path):
+        """导出带 CSS 样式的 VTT 字幕"""
+        content = build_vtt_with_css_style(subtitle)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    return subtitle

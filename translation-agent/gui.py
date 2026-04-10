@@ -5,7 +5,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QLineEdit, QTextEdit, QPushButton, QFileDialog,
     QTabWidget, QMessageBox, QGroupBox, QProgressBar, QDialog,
-    QRadioButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QSizePolicy
+    QRadioButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
+    QHeaderView, QTableWidget, QTableWidgetItem, QFileDialog as _QFileDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
@@ -73,7 +74,7 @@ class ArcoColors:
     RADIUS_MD = "8px"
     RADIUS_LG = "12px"
 
-    # ── 字体（Windows 优先中文字体，避免模糊） ──
+    # ── 字体 ──
     FONT_FAMILY = "'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'Segoe UI', sans-serif"
     FONT_FAMILY_EN = "'Segoe UI', 'Microsoft YaHei UI', -apple-system, sans-serif"
 
@@ -253,7 +254,7 @@ def arco_global_stylesheet():
         font-weight: 600;
     }}
 
-    /* ── 主按钮 (Primary) — 渐变 + 阴影感 ── */
+    /* ── 主按钮 (Primary) ── */
     QPushButton#primaryBtn {{
         background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3370FF, stop:1 #165DFF);
         color: #FFFFFF;
@@ -275,7 +276,7 @@ def arco_global_stylesheet():
         color: {C.TEXT_DISABLED};
     }}
 
-    /* ── 次按钮 (Outline) — 带微光背景 ── */
+    /* ── 次按钮 (Outline) ── */
     QPushButton#outlineBtn {{
         background: {C.BG_CARD};
         color: {C.TEXT_REGULAR};
@@ -414,7 +415,6 @@ def arco_global_stylesheet():
     /* ── 消息对话框 (QMessageBox) ── */
     QMessageBox {{
         background-color: {C.BG_CARD};
-        color: {C.TEXT_PRIMARY};
     }}
     QMessageBox QLabel {{
         color: {C.TEXT_PRIMARY};
@@ -452,14 +452,84 @@ def arco_global_stylesheet():
 
     /* ── 对话框 (QDialog) 兜底 ── */
     QDialog {{
-        background-color: {C.BG_PAGE};
+        background-color: {C.BG_CARD};
         color: {C.TEXT_PRIMARY};
+    }}
+    QDialog QLabel {{
+        color: {C.TEXT_PRIMARY};
+        background: transparent;
+    }}
+    QDialog QTextEdit {{
+        color: {C.TEXT_PRIMARY};
+    }}
+    QDialog QLineEdit {{
+        color: {C.TEXT_PRIMARY};
+    }}
+    QDialog QComboBox {{
+        color: {C.TEXT_PRIMARY};
+    }}
+
+    /* ── 文件对话框 ── */
+    QFileDialog {{
+        background-color: {C.BG_CARD};
+        color: {C.TEXT_PRIMARY};
+    }}
+    QFileDialog QLabel {{
+        color: {C.TEXT_PRIMARY};
+    }}
+    QFileDialog QLineEdit {{
+        color: {C.TEXT_PRIMARY};
+    }}
+    QFileDialog QComboBox {{
+        color: {C.TEXT_PRIMARY};
+    }}
+    QFileDialog QTreeView {{
+        color: {C.TEXT_PRIMARY};
+        background: {C.BG_CARD};
+    }}
+    QFileDialog QListView {{
+        color: {C.TEXT_PRIMARY};
+        background: {C.BG_CARD};
+    }}
+
+    /* ── 滚动条 ── */
+    QScrollBar:vertical {{
+        background: transparent;
+        width: 6px;
+        margin: 0;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {C.FILL4};
+        border-radius: 3px;
+        min-height: 20px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background: {C.TEXT_SECONDARY};
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0;
+    }}
+    QScrollBar:horizontal {{
+        background: transparent;
+        height: 6px;
+        margin: 0;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: {C.FILL4};
+        border-radius: 3px;
+        min-width: 20px;
+    }}
+    QScrollBar::handle:horizontal:hover {{
+        background: {C.TEXT_SECONDARY};
+    }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        width: 0;
     }}
     """
 
 
 # ═══════════════════════════════════════════════════════════
-# 辅助函数：创建分隔线
+# 辅助函数
 # ═══════════════════════════════════════════════════════════
 def make_h_line(color=None):
     """水平分隔线"""
@@ -473,7 +543,6 @@ def make_h_line(color=None):
 
 def make_shadow_widget(widget, shadow_type="sm"):
     """给 widget 添加 Arco Design 风格阴影"""
-    C = ArcoColors
     shadow = QGraphicsDropShadowEffect()
     shadow.setBlurRadius(12)
     shadow.setOffset(0, 2)
@@ -491,8 +560,8 @@ def make_shadow_widget(widget, shadow_type="sm"):
 def chat(system, user, temperature=0.3):
     resp = client.chat.completions.create(
         model=model, temperature=temperature,
-        messages=[{"role":"system","content":system},
-                  {"role":"user","content":user}]
+        messages=[{"role": "system", "content": system},
+                  {"role": "user", "content": user}]
     )
     return resp.choices[0].message.content
 
@@ -507,7 +576,7 @@ def fetch_url(url):
     try:
         resp = requests.get(url, timeout=15)
         soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup(["script","style","nav","footer"]):
+        for tag in soup(["script", "style", "nav", "footer"]):
             tag.decompose()
         text = soup.get_text(separator="\n").strip()
         if len(text) > 200:
@@ -816,7 +885,6 @@ class ExportDialog(QDialog):
             }}
         """)
 
-        # 带阴影的卡片布局
         card = QFrame()
         card.setStyleSheet(f"""
             QFrame {{
@@ -831,7 +899,6 @@ class ExportDialog(QDialog):
         card_layout.setSpacing(16)
         card_layout.setContentsMargins(24, 24, 24, 24)
 
-        # 外层布局
         outer = QVBoxLayout(self)
         outer.setContentsMargins(24, 24, 24, 24)
         outer.addWidget(card)
@@ -916,14 +983,21 @@ class MainWindow(QMainWindow):
         self.last_analysis = ""
         self.last_critique = ""
         # 字幕相关状态
-        self.subtitle_obj = None      # SubtitleFile 对象
-        self.subtitle_path = None     # 导入的字幕文件路径
-        self.subtitle_worker = None   # SubtitleWorker 线程
-        self.setup_ui()
+        self.subtitle_obj = None
+        self.subtitle_path = None
+        self.subtitle_worker = None
         self.apply_styles()
+        self.setup_ui()
 
     def apply_styles(self):
         self.setStyleSheet(arco_global_stylesheet())
+
+    def _swap_languages(self):
+        """交换源语言和目标语言"""
+        src_idx = self.source_lang.currentIndex()
+        tgt_idx = self.target_lang.currentIndex()
+        self.source_lang.setCurrentIndex(tgt_idx)
+        self.target_lang.setCurrentIndex(src_idx)
 
     def setup_ui(self):
         C = ArcoColors
@@ -966,8 +1040,8 @@ class MainWindow(QMainWindow):
         """)
         make_shadow_widget(sg, "sm")
         sl = QHBoxLayout(sg)
-        sl.setSpacing(24)
-        sl.setContentsMargins(20, 16, 20, 16)
+        sl.setSpacing(12)
+        sl.setContentsMargins(20, 12, 20, 12)
 
         # 卡片小标题（放在卡片上方）
         settings_title = QLabel("翻译设置")
@@ -977,99 +1051,81 @@ class MainWindow(QMainWindow):
         layout.addWidget(settings_title)
         layout.addWidget(sg)
 
-        # ── 语言选择区 ──
-        # 左：源语言 | 中：交换按钮 | 右：目标语言
+        # ── 语言选择区（紧凑单行） ──
         lang_row = QHBoxLayout()
-        lang_row.setSpacing(12)
+        lang_row.setSpacing(8)
 
         # 源语言
-        src_col = QVBoxLayout()
-        src_col.setSpacing(6)
-        src_lbl = QLabel("🌐  源语言")
-        src_lbl.setStyleSheet(f"color: {C.TEXT_REGULAR}; font-size: 13px; font-weight: 600; border: none; background: transparent;")
-        src_lbl.setFixedHeight(20)
-        src_col.addWidget(src_lbl)
+        src_lbl = QLabel("源语言")
+        src_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        lang_row.addWidget(src_lbl)
         self.source_lang = QComboBox()
         self.source_lang.addItems(["English", "Chinese", "Japanese", "Korean", "French", "German", "Spanish"])
-        self.source_lang.setFixedHeight(40)
-        self.source_lang.setMinimumWidth(160)
+        self.source_lang.setFixedHeight(34)
+        self.source_lang.setMinimumWidth(120)
         self.source_lang.setCursor(Qt.CursorShape.PointingHandCursor)
-        src_col.addWidget(self.source_lang)
-        lang_row.addLayout(src_col, stretch=1)
+        lang_row.addWidget(self.source_lang)
 
         # 交换按钮
-        swap_btn = QPushButton("⇄")
-        swap_btn.setFixedSize(40, 40)
-        swap_btn.setObjectName("textBtn")
+        swap_btn = QPushButton("SWAP")
+        swap_btn.setFixedSize(50, 34)
         swap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        swap_btn.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        swap_btn.setToolTip("交换源语言和目标语言")
         swap_btn.setStyleSheet(f"""
             QPushButton {{
-                background: {C.FILL1};
-                color: {C.TEXT_SECONDARY};
-                border: 1px solid {C.BORDER_LIGHT};
-                border-radius: 20px;
+                background: {C.PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 1px;
             }}
             QPushButton:hover {{
-                background: {C.PRIMARY_LIGHT};
-                color: {C.PRIMARY};
-                border-color: {C.PRIMARY};
+                background: {C.PRIMARY_HOVER};
             }}
         """)
-
-        def swap_languages():
-            src_idx = self.source_lang.currentIndex()
-            tgt_idx = self.target_lang.currentIndex()
-            self.source_lang.setCurrentIndex(tgt_idx)
-            self.target_lang.setCurrentIndex(src_idx)
-
-        swap_btn.clicked.connect(swap_languages)
-        lang_row.addWidget(swap_btn, stretch=0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        swap_btn.clicked.connect(self._swap_languages)
+        lang_row.addWidget(swap_btn)
 
         # 目标语言
-        tgt_col = QVBoxLayout()
-        tgt_col.setSpacing(6)
-        tgt_lbl = QLabel("🎯  目标语言")
-        tgt_lbl.setStyleSheet(f"color: {C.TEXT_REGULAR}; font-size: 13px; font-weight: 600; border: none; background: transparent;")
-        tgt_lbl.setFixedHeight(20)
-        tgt_col.addWidget(tgt_lbl)
+        tgt_lbl = QLabel("目标语言")
+        tgt_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        lang_row.addWidget(tgt_lbl)
         self.target_lang = QComboBox()
         self.target_lang.addItems(["Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish"])
-        self.target_lang.setFixedHeight(40)
-        self.target_lang.setMinimumWidth(160)
+        self.target_lang.setFixedHeight(34)
+        self.target_lang.setMinimumWidth(120)
         self.target_lang.setCursor(Qt.CursorShape.PointingHandCursor)
-        tgt_col.addWidget(self.target_lang)
-        lang_row.addLayout(tgt_col, stretch=1)
+        lang_row.addWidget(self.target_lang)
 
+        # 分隔点
+        sep_dot = QLabel("·")
+        sep_dot.setStyleSheet(f"color: {C.TEXT_DISABLED}; font-size: 18px; border: none; background: transparent;")
+        sep_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lang_row.addWidget(sep_dot)
+
+        # 风格
+        style_lbl = QLabel("风格")
+        style_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        lang_row.addWidget(style_lbl)
+        self.style_input = QLineEdit()
+        self.style_input.setPlaceholderText("formal / auto")
+        self.style_input.setFixedHeight(34)
+        self.style_input.setMinimumWidth(140)
+        lang_row.addWidget(self.style_input)
+
+        # 目标读者
+        aud_lbl = QLabel("目标读者")
+        aud_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        lang_row.addWidget(aud_lbl)
+        self.audience_input = QLineEdit()
+        self.audience_input.setPlaceholderText("general / technical")
+        self.audience_input.setFixedHeight(34)
+        self.audience_input.setMinimumWidth(140)
+        lang_row.addWidget(self.audience_input)
+
+        lang_row.addStretch()
         sl.addLayout(lang_row)
-        sl.addSpacing(8)
-
-        # 右侧分隔线
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(f"background-color: {C.BORDER_LIGHT}; border: none;")
-        sep.setFixedWidth(1)
-        sl.addWidget(sep)
-
-        # ── 风格 & 读者 ──
-        for lbl_text, ph, attr in [
-            ("风格", "formal / conversational / technical / auto", "style_input"),
-            ("目标读者", "general / technical / academic / business", "audience_input"),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(6)
-            lbl = QLabel(lbl_text)
-            lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
-            lbl.setFixedHeight(18)
-            col.addWidget(lbl)
-            le = QLineEdit()
-            le.setPlaceholderText(ph)
-            le.setFixedHeight(38)
-            le.setMinimumWidth(130)
-            setattr(self, attr, le)
-            col.addWidget(le)
-            sl.addLayout(col)
 
         # ── 输入内容卡片 ──
         ig = QFrame()
@@ -1107,7 +1163,7 @@ class MainWindow(QMainWindow):
         tl.setContentsMargins(8, 8, 8, 8)
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText("在此粘贴需要翻译的文字...")
-        self.text_input.setMinimumHeight(100)
+        self.text_input.setMinimumHeight(160)
         from PyQt6.QtGui import QTextOption
         self.text_input.setWordWrapMode(QTextOption.WrapMode.WordWrap)
         tl.addWidget(self.text_input)
@@ -1190,7 +1246,7 @@ class MainWindow(QMainWindow):
         self.sub_preview = QTextEdit()
         self.sub_preview.setReadOnly(True)
         self.sub_preview.setPlaceholderText("导入字幕文件后，此处显示预览...")
-        self.sub_preview.setMinimumHeight(70)
+        self.sub_preview.setMinimumHeight(120)
         sl_layout.addWidget(self.sub_preview)
 
         # 字幕操作按钮
@@ -1339,8 +1395,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(rg, stretch=1)
 
+    # ═══════════════════════════════════════════════════════════
+    # OCR 进度回调
+    # ═══════════════════════════════════════════════════════════
     def _ocr_progress_handler(self, current, total, message):
-        """OCR 进度回调，在主线程安全地更新 UI"""
         from PyQt6.QtCore import QMetaObject, Q_ARG
         QMetaObject.invokeMethod(
             self.progress_label, "setText",
@@ -1353,6 +1411,9 @@ class MainWindow(QMainWindow):
             )
         QApplication.processEvents()
 
+    # ═══════════════════════════════════════════════════════════
+    # 文件操作
+    # ═══════════════════════════════════════════════════════════
     def choose_file(self):
         try:
             path, _ = QFileDialog.getOpenFileName(
@@ -1387,6 +1448,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"读取失败：{str(e)}")
 
+    # ═══════════════════════════════════════════════════════════
+    # 翻译流程
+    # ═══════════════════════════════════════════════════════════
     def do_translate(self):
         tab = self.tabs.currentIndex()
         source_text = ""
@@ -1443,6 +1507,8 @@ class MainWindow(QMainWindow):
         self.last_analysis = analysis
         self.analysis_output.setPlainText(analysis)
         self.export_term_btn.setEnabled(True)
+        # 自动切换到分析报告tab让用户看到
+        self.result_tabs.setCurrentIndex(0)
 
     def on_critique_done(self, critique):
         self.last_critique = critique
@@ -1469,716 +1535,599 @@ class MainWindow(QMainWindow):
     def _get_target_lang(self):
         return self.target_lang.currentText() if hasattr(self, 'target_lang') and self.target_lang else "Chinese"
 
+    # ═══════════════════════════════════════════════════════════
+    # 术语导出
+    # ═══════════════════════════════════════════════════════════
     def export_glossary(self):
-        """导出术语库（只包含词汇和表达，不含分析报告全文）"""
-        from glossary import export_glossary_text, get_terms
+        """从分析报告+审校报告提取术语并导出"""
+        from glossary import get_terms, extract_terms_from_analysis, add_terms_batch
+
         source_lang = self._get_source_lang()
         target_lang = self._get_target_lang()
+
+        # 先确保术语已从分析报告提取入库
+        if self.last_analysis:
+            new_terms = extract_terms_from_analysis(self.last_analysis, source_lang, target_lang)
+            if new_terms:
+                added, _ = add_terms_batch(new_terms, source_lang, target_lang)
+                if added > 0:
+                    QMessageBox.information(self, "提示", f"从分析报告提取并新增了 {added} 条术语。")
+
         terms = get_terms(source_lang, target_lang)
         if not terms:
             QMessageBox.information(self, "提示",
-                f"当前语言对（{source_lang} → {target_lang}）的术语库为空。\n\n"
-                "翻译后会自动从分析报告中提取术语入库。")
+                                    f"当前语言对（{source_lang} → {target_lang}）的术语库为空。\n\n"
+                                    "请先完成一次翻译，术语会自动从分析报告中提取。")
             return
+
+        # 选择导出格式
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出术语库", f"术语表_{source_lang}_{target_lang}.txt",
-            "文本文件 (*.txt);;JSON 文件 (*.json);;Word文档 (*.docx)")
+            self, "导出术语库", f"术语表_{source_lang}_{target_lang}",
+            "Excel 文档 (*.xlsx);;Word 文档 (*.docx);;文本文件 (*.txt);;JSON 文件 (*.json)")
         if not path:
             return
+
         try:
-            if path.endswith(".json"):
+            ext = path.lower().split(".")[-1]
+
+            if ext == "xlsx":
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "术语表"
+
+                # 标题行样式
+                from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+                header_font = Font(bold=True, size=12, color="FFFFFF")
+                header_fill = PatternFill(start_color="165DFF", end_color="165DFF", fill_type="solid")
+                thin_border = Border(
+                    left=Side(style='thin', color='E5E6EB'),
+                    right=Side(style='thin', color='E5E6EB'),
+                    top=Side(style='thin', color='E5E6EB'),
+                    bottom=Side(style='thin', color='E5E6EB'))
+
+                headers = ["原文", "译文", "分类"]
+                for col, h in enumerate(headers, 1):
+                    cell = ws.cell(row=1, column=col, value=h)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = Alignment(horizontal='center')
+                    cell.border = thin_border
+
+                # 按分类分组
+                categories = {}
+                for t in terms:
+                    cat = t.get("category", "通用")
+                    categories.setdefault(cat, []).append(t)
+
+                row = 2
+                for cat, items in categories.items():
+                    # 分类标题行
+                    cell = ws.cell(row=row, column=1, value=f"【{cat}】")
+                    cell.font = Font(bold=True, size=11, color="165DFF")
+                    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=3)
+                    row += 1
+                    for t in items:
+                        ws.cell(row=row, column=1, value=t.get("source", "")).border = thin_border
+                        ws.cell(row=row, column=2, value=t.get("target", "")).border = thin_border
+                        ws.cell(row=row, column=3, value=t.get("category", "")).border = thin_border
+                        row += 1
+
+                # 列宽
+                ws.column_dimensions['A'].width = 30
+                ws.column_dimensions['B'].width = 30
+                ws.column_dimensions['C'].width = 15
+
+                wb.save(path)
+
+            elif ext == "docx":
+                from docx import Document
+                from docx.shared import Pt, RGBColor, Cm
+                from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+                doc = Document()
+
+                # 标题
+                title = doc.add_heading(f"术语表 ({source_lang} → {target_lang})", level=1)
+
+                # 按分类分组
+                categories = {}
+                for t in terms:
+                    cat = t.get("category", "通用")
+                    categories.setdefault(cat, []).append(t)
+
+                for cat, items in categories.items():
+                    doc.add_heading(cat, level=2)
+
+                    # 表格
+                    table = doc.add_table(rows=1, cols=2, style='Table Grid')
+                    hdr = table.rows[0].cells
+                    hdr[0].text = source_lang
+                    hdr[1].text = target_lang
+                    for cell in hdr:
+                        for p in cell.paragraphs:
+                            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            for run in p.runs:
+                                run.bold = True
+
+                    for t in items:
+                        row = table.add_row()
+                        row.cells[0].text = t.get("source", "")
+                        row.cells[1].text = t.get("target", "")
+
+                doc.save(path)
+
+            elif ext == "json":
                 from glossary import export_glossary_json
                 content = export_glossary_json(source_lang, target_lang)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
-            elif path.endswith(".docx"):
-                from docx import Document
-                from docx.shared import RGBColor
-                doc = Document()
-                doc.add_heading(f"术语表 ({source_lang} → {target_lang})", level=1)
 
-                categories = {}
-                for t in terms:
-                    cat = t.get("category", "术语")
-                    if cat not in categories:
-                        categories[cat] = []
-                    categories[cat].append(t)
-
-                for cat, cat_terms in categories.items():
-                    doc.add_heading(f"【{cat}】", level=2)
-                    table = doc.add_table(rows=1, cols=3)
-                    table.style = "Table Grid"
-                    hdr = table.rows[0].cells
-                    for idx, txt in enumerate(["原文", "译文", "分类"]):
-                        run = hdr[idx].paragraphs[0].add_run(txt)
-                        run.bold = True
-                        run.font.color.rgb = RGBColor(0x16, 0x5D, 0xFF)
-                    for t in cat_terms:
-                        row = table.add_row().cells
-                        row[0].paragraphs[0].add_run(t["source"])
-                        row[1].paragraphs[0].add_run(t["target"])
-                        row[2].paragraphs[0].add_run(t.get("category", ""))
-                    doc.add_paragraph("")
-
-                doc.save(path)
-            else:
+            else:  # txt
+                from glossary import export_glossary_text
                 content = export_glossary_text(source_lang, target_lang)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
 
-            QMessageBox.information(self, "导出成功",
-                f"术语库已保存（{len(terms)} 条）：\n{path}")
-        except Exception as e:
-            QMessageBox.critical(self, "失败", str(e))
+            QMessageBox.information(self, "完成", f"术语表已导出到：\n{path}\n共 {len(terms)} 条术语。")
 
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
+
+    # ═══════════════════════════════════════════════════════════
+    # 审校导出
+    # ═══════════════════════════════════════════════════════════
     def export_critique(self):
         if not self.last_critique:
-            QMessageBox.warning(self, "提示", "暂无审校报告可导出")
+            QMessageBox.warning(self, "提示", "暂无审校报告可导出。")
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "导出审校报告", "审校报告.txt",
-            "文本文件 (*.txt);;Word文档 (*.docx)")
+            "文本文件 (*.txt);;Markdown (*.md)")
         if not path:
             return
         try:
-            if path.endswith(".docx"):
-                from docx import Document
-                doc = Document()
-                doc.add_heading("审校报告", level=1)
-                doc.add_paragraph(self.last_critique)
-                doc.save(path)
-            else:
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(self.last_critique)
-            QMessageBox.information(self, "导出成功", f"审校报告已保存：\n{path}")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.last_critique)
+            QMessageBox.information(self, "完成", f"审校报告已导出到：\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "失败", str(e))
+            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
 
-    def _get_export_suffix(self):
-        """根据源语言/目标语言生成 EC/CE 后缀。
-        中译英 = CE (Chinese→English)，英译中 = EC (English→Chinese)
-        其他语言对统一用方向缩写。"""
-        sl = self.source_lang.currentText().lower()
-        tl = self.target_lang.currentText().lower()
-        if sl == "chinese" and tl == "english":
-            return "CE"
-        elif sl == "english" and tl == "chinese":
-            return "EC"
-        else:
-            return f"{sl[:2].upper()}{tl[:2].upper()}"
-
-    def _get_default_export_name(self, fmt):
-        """生成默认导出文件名：原文件名-EC/CE-agent.fmt"""
-        suffix = self._get_export_suffix()
-        if self.file_path and os.path.exists(self.file_path):
-            name = os.path.splitext(os.path.basename(self.file_path))[0]
-            return f"{name}-{suffix}-agent.{fmt}"
-        else:
-            return f"translation-{suffix}-agent.{fmt}"
-
+    # ═══════════════════════════════════════════════════════════
+    # 导出译文
+    # ═══════════════════════════════════════════════════════════
     def do_export(self):
         if not self.last_result:
-            QMessageBox.warning(self, "提示", "请先完成翻译。")
+            QMessageBox.warning(self, "提示", "暂无译文可导出。")
             return
-
-        dialog = ExportDialog(self, self.file_type or "docx")
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+        dlg = ExportDialog(self, self.file_type)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-
-        fmt = dialog.get_fmt()
-        mode = dialog.get_mode()
-        default_name = self._get_default_export_name(fmt)
-
-        out_path, _ = QFileDialog.getSaveFileName(
-            self, "保存文件", default_name,
-            f"{fmt.upper()} 文件 (*.{fmt})"
-        )
-        if not out_path:
-            return
-
+        fmt = dlg.get_fmt()
+        mode = dlg.get_mode()
         try:
-            from file_handler import (
-                export_pdf_bilingual, export_pdf_paragraph, export_pdf_translation,
-                export_docx_bilingual, export_docx_paragraph, export_docx_translation,
-                export_excel_bilingual, export_excel_translation,
-                export_pptx_bilingual, export_pptx_translation,
+            if fmt in ("docx", "doc"):
+                from docx import Document
+                from docx.shared import Pt
+                doc = Document()
+                if mode == "bilingual":
+                    doc.add_heading("双语对照", level=1)
+                    src_lines = self.last_source.split("\n")
+                    tgt_lines = self.last_result.split("\n")
+                    for s, t in zip(src_lines, tgt_lines):
+                        p = doc.add_paragraph()
+                        p.add_run(s).font.size = Pt(10)
+                        p = doc.add_paragraph()
+                        run = p.add_run(t)
+                        run.font.size = Pt(10)
+                        run.font.color.rgb = RGBColor(0x16, 0x5D, 0xFF)
+                elif mode == "translation":
+                    doc.add_paragraph(self.last_result)
+                else:
+                    doc.add_paragraph(self.last_result)
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "保存", "译文.docx", "Word 文档 (*.docx)")
+                if path:
+                    doc.save(path)
+            elif fmt in ("xlsx", "xls"):
+                import openpyxl
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "译文"
+                ws.append(["原文", "译文"])
+                src_lines = self.last_source.split("\n")
+                tgt_lines = self.last_result.split("\n")
+                for s, t in zip(src_lines, tgt_lines):
+                    ws.append([s, t])
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "保存", "译文.xlsx", "Excel 文档 (*.xlsx)")
+                if path:
+                    wb.save(path)
+            else:
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "保存", "译文.txt", "文本文件 (*.txt)")
+                if path:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(self.last_result)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
+
+    # ═══════════════════════════════════════════════════════════
+    # 复制结果
+    # ═══════════════════════════════════════════════════════════
+    def copy_result(self):
+        if self.last_result:
+            QApplication.clipboard().setText(self.last_result)
+            QMessageBox.information(self, "完成", "译文已复制到剪贴板。")
+
+    # ═══════════════════════════════════════════════════════════
+    # 字幕导入（含自动清洗）
+    # ═══════════════════════════════════════════════════════════
+    def choose_subtitle_file(self):
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                filter="字幕文件 (*.srt *.vtt *.ass *.ssa)")
+            if not path:
+                return
+
+            from subtitle_handler import (
+                parse_subtitle_file,
+                clean_subtitle_file,
             )
 
-            if fmt == "pdf":
-                if mode == "bilingual":
-                    export_pdf_bilingual(self.last_source, self.last_result, out_path)
-                elif mode == "paragraph":
-                    export_pdf_paragraph(self.last_source, self.last_result, out_path)
-                else:
-                    export_pdf_translation(self.last_result, out_path)
+            parsed = parse_subtitle_file(path)
+            if not parsed or not parsed.entries:
+                QMessageBox.warning(self, "提示", "无法解析该字幕文件。")
+                return
 
-            elif fmt in ["docx", "doc"]:
-                if mode == "bilingual":
-                    export_docx_bilingual(self.last_source, self.last_result,
-                                          out_path, self.file_path)
-                elif mode == "paragraph":
-                    export_docx_paragraph(self.last_source, self.last_result,
-                                          out_path, self.file_path)
-                else:
-                    export_docx_translation(self.last_result,
-                                            out_path, self.file_path)
+            # ── 自动清洗字幕 ──
+            parsed = clean_subtitle_file(parsed)
 
-            elif fmt in ["xlsx", "xls"]:
-                if self.file_extra:
-                    if mode == "bilingual":
-                        export_excel_bilingual(self.file_extra, self.last_result,
-                                               out_path, self.file_path)
-                    else:
-                        export_excel_translation(self.last_result,
-                                                 out_path, self.file_path)
+            self.subtitle_obj = parsed
+            self.subtitle_path = path
+            self.sub_file_label.setText(f"已导入（已清洗）：{os.path.basename(path)} [{len(parsed.entries)} 条]")
+            self.sub_translate_btn.setEnabled(True)
+            self.sub_export_btn.setEnabled(False)
 
-            elif fmt in ["pptx", "ppt"]:
-                if self.file_path:
-                    if mode == "bilingual":
-                        export_pptx_bilingual(self.file_path, self.last_result, out_path)
-                    else:
-                        export_pptx_translation(self.file_path, self.last_result, out_path)
-                else:
-                    QMessageBox.warning(self, "提示", "需先导入 PPT 文件")
-                    return
+            # 预览前 20 条
+            preview_lines = []
+            for e in parsed.entries[:20]:
+                preview_lines.append(f"[{e.index}] {e.start_time} --> {e.end_time}")
+                preview_lines.append(f"    {e.text}")
+                preview_lines.append("")
+            if len(parsed.entries) > 20:
+                preview_lines.append(f"... 共 {len(parsed.entries)} 条，仅显示前 20 条")
+            self.sub_preview.setPlainText("\n".join(preview_lines))
 
-            QMessageBox.information(self, "导出成功", f"已保存：\n{out_path}")
+            # 自动设置输出格式
+            ext = path.lower().split(".")[-1]
+            fmt_map = {"srt": "SRT (.srt)", "vtt": "VTT (.vtt)", "ass": "ASS (.ass)", "ssa": "ASS (.ass)"}
+            target_fmt = fmt_map.get(ext, "同原格式")
+            idx = self.sub_fmt_combo.findText(target_fmt)
+            if idx >= 0:
+                self.sub_fmt_combo.setCurrentIndex(idx)
 
         except Exception as e:
-            QMessageBox.critical(self, "失败", str(e))
-
-    def copy_result(self):
-        text = self.result_output.toPlainText()
-        if text:
-            QApplication.clipboard().setText(text)
-            QMessageBox.information(self, "成功", "已复制译文")
+            QMessageBox.critical(self, "错误", f"导入字幕失败：{str(e)}")
 
     # ═══════════════════════════════════════════════════════════
     # 字幕翻译
     # ═══════════════════════════════════════════════════════════
-
-    def choose_subtitle_file(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "导入字幕文件", "",
-            "字幕文件 (*.srt *.vtt *.ass *.ssa);;所有文件 (*)"
-        )
-        if not path:
-            return
-        try:
-            from subtitle_handler import read_subtitle_file
-            sub = read_subtitle_file(path)
-            self.subtitle_obj = sub
-            self.subtitle_path = path
-
-            preview_lines = [f"文件: {os.path.basename(path)}"]
-            preview_lines.append(f"格式: {sub.format_type.upper()}")
-            preview_lines.append(f"条目数: {sub.entry_count}")
-            preview_lines.append(f"总时长: {sub.entries[-1].end_time if sub.entries else 'N/A'}")
-            preview_lines.append("")
-            preview_lines.append("── 预览（前 20 条）──")
-            for entry in sub.entries[:20]:
-                preview_lines.append(f"[{entry.start_time} --> {entry.end_time}]  {entry.text}")
-            if sub.entry_count > 20:
-                preview_lines.append(f"\n... 还有 {sub.entry_count - 20} 条")
-
-            self.sub_preview.setPlainText("\n".join(preview_lines))
-            self.subtitle_obj = parsed_subtitle
-
-            # ── 自动清洗字幕 ──
-            from subtitle_handler import clean_subtitle_file
-            self.subtitle_obj = clean_subtitle_file(self.subtitle_obj)
-
-            self.sub_file_label.setText(f"已导入（已清洗）：{os.path.basename(path)}")
-            self.sub_file_label.setText(f"已加载: {os.path.basename(path)} ({sub.entry_count} 条)")
-            self.sub_translate_btn.setEnabled(True)
-            self.sub_export_btn.setEnabled(False)
-
-            fmt_map = {"srt": 0, "vtt": 1, "ass": 2, "ssa": 2}
-            idx = fmt_map.get(sub.format_type, 0)
-            self.sub_fmt_combo.setCurrentIndex(idx)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"字幕文件读取失败：{str(e)}")
-
     def do_subtitle_translate(self):
         if not self.subtitle_obj:
             QMessageBox.warning(self, "提示", "请先导入字幕文件。")
             return
-        if not self.subtitle_obj.entries:
-            QMessageBox.warning(self, "提示", "字幕文件为空。")
-            return
-
         self.sub_translate_btn.setEnabled(False)
         self.sub_export_btn.setEnabled(False)
-        self.progress_bar.setRange(0, 5)
         self.progress_bar.setValue(0)
         self.progress_label.setText("")
 
         self.subtitle_worker = SubtitleWorker(
-            subtitle=self.subtitle_obj,
-            source_lang=self.source_lang.currentText(),
-            target_lang=self.target_lang.currentText(),
+            self.subtitle_obj,
+            self._get_source_lang(),
+            self._get_target_lang(),
         )
-        self.subtitle_worker.progress.connect(self.on_progress)
-        self.subtitle_worker.finished.connect(self.on_subtitle_finished)
-        self.subtitle_worker.error.connect(self.on_subtitle_error)
+        self.subtitle_worker.progress.connect(self._on_subtitle_progress)
+        self.subtitle_worker.finished.connect(self._on_subtitle_finished)
+        self.subtitle_worker.error.connect(self._on_subtitle_error)
         self.subtitle_worker.start()
 
-    def on_subtitle_finished(self, subtitle, translated_texts):
-        self.subtitle_obj = subtitle
-        self.sub_translate_btn.setEnabled(True)
-        self.sub_export_btn.setEnabled(True)
+    def _on_subtitle_progress(self, msg, step):
+        self.progress_label.setText(msg)
+        self.progress_bar.setValue(step)
 
-        preview_lines = ["翻译完成！双语预览："]
-        preview_lines.append("")
-        translated_count = sum(1 for e in subtitle.entries if e.translated)
-        preview_lines.append(f"已翻译: {translated_count}/{subtitle.entry_count} 条")
-        preview_lines.append("")
-        for entry in subtitle.entries[:30]:
-            preview_lines.append(f"[{entry.start_time} --> {entry.end_time}]")
-            preview_lines.append(f"  {entry.text}")
-            if entry.translated:
-                preview_lines.append(f"  {entry.translated}")
-            preview_lines.append("")
-        if subtitle.entry_count > 30:
-            preview_lines.append(f"... 还有 {subtitle.entry_count - 30} 条")
+    def _on_subtitle_finished(self, subtitle, translated):
+            self.subtitle_obj = subtitle
+            self.sub_translate_btn.setEnabled(True)
+            self.sub_export_btn.setEnabled(True)
+            self.progress_label.setText("字幕翻译完成！")
+            self.progress_bar.setValue(5)
 
-        self.sub_preview.setPlainText("\n".join(preview_lines))
-        self.progress_label.setText(f"字幕翻译完成！共 {translated_count}/{subtitle.entry_count} 条")
-        self.progress_bar.setValue(5)
+            # 生成翻译摘要报告 → 填入分析 tab
+            source_lang = self._get_source_lang()
+            target_lang = self._get_target_lang()
+            total = len(subtitle.entries)
+            translated_count = sum(1 for e in subtitle.entries if e.translated.strip())
+            empty_count = total - translated_count
+            total_chars_src = sum(len(e.text) for e in subtitle.entries)
+            total_chars_tgt = sum(len(e.translated) for e in subtitle.entries if e.translated.strip())
 
-    def on_subtitle_error(self, msg):
-        QMessageBox.critical(self, "字幕翻译错误", msg)
-        self.progress_label.setText("")
-        self.progress_bar.setValue(0)
-        self.sub_translate_btn.setEnabled(True)
+            report = f"""## 字幕翻译报告
 
+    - 源语言：{source_lang}
+    - 目标语言：{target_lang}
+    - 字幕总条数：{total}
+    - 已翻译条数：{translated_count}
+    - 空条目（未翻译）：{empty_count}
+    - 原文字符数：{total_chars_src}
+    - 译文字符数：{total_chars_tgt}
+    """
+            self.analysis_output.setPlainText(report)
+            self.result_tabs.setCurrentIndex(0)
+            self.export_term_btn.setEnabled(True)
+
+            # 生成简单审校摘要 → 填入审校 tab
+            # 检查是否有明显问题
+            issues = []
+            for i, e in enumerate(subtitle.entries):
+                if not e.translated.strip():
+                    continue
+                # 检查译文是否和原文完全一样（未翻译）
+                if e.translated.strip() == e.text.strip() and source_lang != target_lang:
+                    issues.append(f"[{e.index}] 可能未翻译：{e.text[:30]}")
+                # 检查译文过长
+                ratio = len(e.translated) / max(len(e.text), 1)
+                if ratio > 2.5 and len(e.text) > 3:
+                    issues.append(f"[{e.index}] 译文偏长（{len(e.text)}→{len(e.translated)}字符）：{e.text[:30]}")
+
+            if issues:
+                critique = f"""## 审校摘要
+
+    发现 {len(issues)} 个可能的问题：
+
+    """
+                for issue in issues[:30]:
+                    critique += f"- {issue}\n"
+                if len(issues) > 30:
+                    critique += f"\n... 共 {len(issues)} 个问题，仅显示前 30 条"
+            else:
+                critique = f"""## 审校摘要
+
+    - 未发现明显问题，共翻译 {translated_count} 条字幕。
+    - 译文与原文长度比例正常。
+    """
+
+            self.critique_output.setPlainText(critique)
+
+            # 更新预览
+            preview_lines = []
+            for e in subtitle.entries[:20]:
+                preview_lines.append(f"[{e.index}] {e.start_time} --> {e.end_time}")
+                preview_lines.append(f"    {e.text}")
+                if e.translated:
+                    preview_lines.append(f"    → {e.translated}")
+                preview_lines.append("")
+            if len(subtitle.entries) > 20:
+                preview_lines.append(f"... 共 {len(subtitle.entries)} 条")
+            self.sub_preview.setPlainText("\n".join(preview_lines))
+    # ═══════════════════════════════════════════════════════════
+    # 字幕导出
+    # ═══════════════════════════════════════════════════════════
     def do_subtitle_export(self):
         if not self.subtitle_obj:
-            QMessageBox.warning(self, "提示", "请先完成字幕翻译。")
+            QMessageBox.warning(self, "提示", "没有可导出的字幕。")
             return
-
-        from subtitle_handler import export_subtitle, generate_subtitle_output_name
-
-        mode_map = {0: "bilingual", 1: "translated", 2: "clean", 3: "clean_bilingual"}
-        mode = mode_map.get(self.sub_mode_combo.currentIndex(), "bilingual")
-
-        fmt_idx = self.sub_fmt_combo.currentIndex()
-        if fmt_idx == 0:
-            fmt = self.subtitle_obj.format_type
-        elif fmt_idx == 1:
-            fmt = "srt"
-        elif fmt_idx == 2:
-            fmt = "vtt"
-        else:
-            fmt = "ass"
-
-        ext_map = {"srt": ".srt", "vtt": ".vtt", "ass": ".ass"}
-        ext = ext_map.get(fmt, ".srt")
-
-        default_name = generate_subtitle_output_name(
-            self.subtitle_path or "subtitle.srt",
-            mode=mode,
-            source_lang=self.source_lang.currentText(),
-            target_lang=self.target_lang.currentText(),
-        )
-
-        out_path, _ = QFileDialog.getSaveFileName(
-            self, "导出字幕", default_name,
-            f"{fmt.upper()} 字幕 (*{ext});;所有文件 (*)"
-        )
-        if not out_path:
-            return
-
         try:
-            export_subtitle(self.subtitle_obj, out_path, mode=mode)
-            QMessageBox.information(self, "导出成功",
-                f"字幕已保存：\n{out_path}\n\n"
-                f"格式: {fmt.upper()} | 模式: {mode}\n"
-                f"条目数: {self.subtitle_obj.entry_count}")
+            from subtitle_handler import (
+                export_subtitle_file,
+                optimize_subtitle_for_video,
+            )
+
+            mode = self.sub_mode_combo.currentIndex()
+            fmt_text = self.sub_fmt_combo.currentText()
+
+            if "SRT" in fmt_text:
+                out_fmt = "srt"
+            elif "VTT" in fmt_text:
+                out_fmt = "vtt"
+            elif "ASS" in fmt_text:
+                out_fmt = "ass"
+            else:
+                ext = self.subtitle_path.lower().split(".")[-1] if self.subtitle_path else "srt"
+                out_fmt = ext if ext in ("srt", "vtt", "ass", "ssa") else "srt"
+
+            base = os.path.splitext(os.path.basename(self.subtitle_path))[0]
+            mode_names = ["双语", "纯译文", "Clean纯文本", "Clean双语"]
+            default_name = f"{base}_{mode_names[mode]}.{out_fmt}"
+
+            path, _ = QFileDialog.getSaveFileName(
+                self, "导出字幕", default_name,
+                f"{out_fmt.upper()} 文件 (*.{out_fmt})")
+            if not path:
+                return
+
+            # 优化适配视频
+            try:
+                optimized = optimize_subtitle_for_video(self.subtitle_obj)
+            except Exception:
+                optimized = self.subtitle_obj
+
+            export_subtitle_file(
+                optimized, path, output_mode=mode, output_format=out_fmt)
+
+            QMessageBox.information(self, "完成",
+                                    f"字幕已导出到：\n{path}\n已自动优化：智能换行 + 时长适配")
         except Exception as e:
-            QMessageBox.critical(self, "导出失败", str(e))
+            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
 
+    # ═══════════════════════════════════════════════════════════
+    # 术语库管理器
+    # ═══════════════════════════════════════════════════════════
     def open_glossary_manager(self):
-        """打开术语库管理窗口 — Arco Design 风格"""
-        from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
-        from glossary import (
-            get_terms, get_all_lang_pairs, delete_term, delete_lang_pair,
-            clear_all, import_glossary_from_text, load_glossary,
-        )
-
+        from glossary import get_terms, add_term, delete_term, clear_glossary, import_glossary_from_text
         C = ArcoColors
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("术语库管理")
-        dialog.setMinimumSize(760, 560)
-        dialog.setStyleSheet(f"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("术语库管理")
+        dlg.setMinimumSize(700, 500)
+        dlg.setStyleSheet(f"""
             QDialog {{
                 background-color: {C.BG_PAGE};
                 color: {C.TEXT_PRIMARY};
             }}
             QLabel {{
-                font-size: 13px;
                 color: {C.TEXT_PRIMARY};
-                border: none; background: transparent;
+                background: transparent;
+            }}
+            QLineEdit {{
+                color: {C.TEXT_PRIMARY};
             }}
             QPushButton {{
-                background: transparent;
-                color: {C.TEXT_REGULAR};
-                border: 1px solid {C.BORDER};
-                border-radius: {C.RADIUS_MD};
-                padding: 8px 16px;
-                font-size: 13px;
-                font-weight: 500;
-            }}
-            QPushButton:hover {{
-                color: {C.PRIMARY};
-                border-color: {C.PRIMARY};
-                background: {C.PRIMARY_LIGHT2};
-            }}
-            QPushButton:disabled {{
-                color: {C.TEXT_DISABLED};
-                border-color: {C.BORDER_LIGHT};
-            }}
-            QPushButton#dangerBtn {{
-                color: {C.DANGER};
-                border-color: {C.DANGER};
-            }}
-            QPushButton#dangerBtn:hover {{
-                background: {C.DANGER_LIGHT};
-                border-color: {C.DANGER};
-                color: {C.DANGER};
-            }}
-            QPushButton#primarySmall {{
-                background: {C.PRIMARY};
-                color: #FFFFFF;
-                border: none;
-                border-radius: {C.RADIUS_MD};
-                padding: 8px 20px;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QPushButton#primarySmall:hover {{
-                background: {C.PRIMARY_HOVER};
-            }}
-            QTableWidget {{
-                background: {C.BG_CARD};
-                alternate-background-color: {C.FILL1};
-                border: 1px solid {C.BORDER_LIGHT};
-                border-radius: {C.RADIUS_MD};
-                font-size: 13px;
-                gridline-color: {C.BORDER_LIGHT};
-                selection-background-color: {C.PRIMARY_LIGHT};
-                selection-color: {C.PRIMARY};
-            }}
-            QTableWidget::item {{
-                padding: 10px 14px;
-                border-bottom: 1px solid {C.BORDER_LIGHT};
-            }}
-            QHeaderView::section {{
-                background: {C.FILL1};
-                color: {C.TEXT_REGULAR};
-                padding: 10px 14px;
-                border: none;
-                border-bottom: 1px solid {C.BORDER};
-                font-weight: 600;
-                font-size: 13px;
-            }}
-            QComboBox {{
-                background: {C.BG_CARD};
-                border: 1px solid {C.BORDER};
-                border-radius: {C.RADIUS_MD};
-                padding: 8px 36px 8px 14px;
-                font-size: 13px;
                 color: {C.TEXT_PRIMARY};
-                min-height: 20px;
-            }}
-            QComboBox:hover {{
-                border-color: {C.PRIMARY_HOVER};
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.BG_ELEVATION};
-                color: {C.TEXT_PRIMARY};
-                border: 1px solid {C.BORDER};
-                border-radius: {C.RADIUS_MD};
-                selection-background-color: {C.PRIMARY_LIGHT};
-                selection-color: {C.PRIMARY};
-            }}
-            QTextEdit {{
-                background: {C.BG_CARD};
-                border: 1px solid {C.BORDER};
-                border-radius: {C.RADIUS_MD};
-                padding: 10px 14px;
-                font-size: 13px;
-                color: {C.TEXT_PRIMARY};
-            }}
-            QTextEdit:focus {{
-                border-color: {C.PRIMARY};
-                border-width: 2px;
-                padding: 9px 13px;
             }}
         """)
 
-        main_layout = QVBoxLayout(dialog)
+        main_layout = QVBoxLayout(dlg)
         main_layout.setSpacing(12)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # 标题区
-        header_layout = QHBoxLayout()
-        header_layout.setSpacing(12)
-        title_lbl = QLabel("术语库")
-        title_lbl.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 18, QFont.Weight.Bold))
-        title_lbl.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
-        header_layout.addWidget(title_lbl)
+        # 标题
+        title = QLabel("术语库管理")
+        title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 16, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; background: transparent;")
+        main_layout.addWidget(title)
 
-        data = load_glossary()
-        stats = data.get("stats", {})
-        stats_lbl = QLabel(f"{stats.get('total_terms', 0)} 条术语  ·  {stats.get('total_pairs', 0)} 个语言对")
-        stats_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; border: none; background: transparent; border: 1px solid {C.BORDER}; border-radius: {C.RADIUS_SM}; padding: 3px 10px; background: {C.FILL1};")
-        header_layout.addWidget(stats_lbl)
-        header_layout.addStretch()
-        main_layout.addLayout(header_layout)
+        # 语言对信息
+        source_lang = self._get_source_lang()
+        target_lang = self._get_target_lang()
+        pair_lbl = QLabel(f"当前语言对：{source_lang} → {target_lang}")
+        pair_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent;")
+        main_layout.addWidget(pair_lbl)
 
-        # 语言对选择行
-        lang_card = QFrame()
-        lang_card.setStyleSheet(f"""
+        # 添加术语区
+        add_frame = QFrame()
+        add_frame.setStyleSheet(f"""
             QFrame {{
                 background: {C.BG_CARD};
                 border: 1px solid {C.BORDER_LIGHT};
                 border-radius: {C.RADIUS_MD};
-                padding: 12px 16px;
+                padding: 12px;
             }}
         """)
-        lang_row = QHBoxLayout(lang_card)
-        lang_row.setContentsMargins(16, 10, 16, 10)
-        lang_row.setSpacing(12)
+        add_layout = QHBoxLayout(add_frame)
+        add_layout.setContentsMargins(12, 12, 12, 12)
+        add_layout.setSpacing(8)
 
-        lang_lbl = QLabel("语言对")
-        lang_lbl.setStyleSheet(f"color: {C.TEXT_REGULAR}; font-weight: 600; font-size: 13px; border: none; background: transparent;")
-        lang_row.addWidget(lang_lbl)
+        add_layout.addWidget(QLabel("原文"))
+        src_le = QLineEdit()
+        src_le.setPlaceholderText("原文术语")
+        src_le.setFixedHeight(34)
+        add_layout.addWidget(src_le)
+        add_layout.addWidget(QLabel("译文"))
+        tgt_le = QLineEdit()
+        tgt_le.setPlaceholderText("目标语言术语")
+        tgt_le.setFixedHeight(34)
+        add_layout.addWidget(tgt_le)
+        cat_le = QLineEdit()
+        cat_le.setPlaceholderText("分类（可选）")
+        cat_le.setFixedWidth(100)
+        cat_le.setFixedHeight(34)
+        add_layout.addWidget(cat_le)
 
-        pairs = get_all_lang_pairs()
-        pair_combo = QComboBox()
-        pair_combo.setMinimumWidth(220)
-        pair_combo.setFixedHeight(36)
-        if pairs:
-            for p in pairs:
-                pair_combo.addItem(f"{p['key']}  ({p['count']} 条)", p['key'])
-        else:
-            pair_combo.addItem("暂无数据", "")
-        lang_row.addWidget(pair_combo)
-        lang_row.addStretch()
+        def do_add():
+            s = src_le.text().strip()
+            t = tgt_le.text().strip()
+            c = cat_le.text().strip() or "通用"
+            if s and t:
+                add_term(s, t, source_lang, target_lang, category=c)
+                src_le.clear()
+                tgt_le.clear()
+                cat_le.clear()
+                refresh_table()
 
-        import_btn = QPushButton("  导入术语  ")
-        import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        import_btn.setFixedHeight(34)
-        lang_row.addWidget(import_btn)
-        main_layout.addWidget(lang_card)
+        add_btn = QPushButton("添加")
+        add_btn.setFixedHeight(34)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.clicked.connect(do_add)
+        add_layout.addWidget(add_btn)
+        main_layout.addWidget(add_frame)
 
-        # 表格
-        table = QTableWidget()
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(["原文", "译文", "分类", "添加时间"])
+        # 术语表格
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["原文", "译文", "分类"])
+        table.horizontalHeader().setStretchLastSection(True)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
         main_layout.addWidget(table)
 
-        # 操作按钮行
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-
         def refresh_table():
-            pair_key = pair_combo.currentData() or ""
-            if not pair_key:
-                table.setRowCount(0)
-                return
-            parts = pair_key.split("→")
-            sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
-            terms = get_terms(sl, tl)
+            terms = get_terms(source_lang, target_lang)
             table.setRowCount(len(terms))
-            for row_idx, t in enumerate(terms):
-                table.setItem(row_idx, 0, QTableWidgetItem(t.get("source", "")))
-                table.setItem(row_idx, 1, QTableWidgetItem(t.get("target", "")))
-                table.setItem(row_idx, 2, QTableWidgetItem(t.get("category", "")))
-                table.setItem(row_idx, 3, QTableWidgetItem(t.get("added_at", "")))
-            data = load_glossary()
-            s = data.get("stats", {})
-            stats_lbl.setText(f"{s.get('total_terms', 0)} 条术语  ·  {s.get('total_pairs', 0)} 个语言对")
+            for i, t in enumerate(terms):
+                table.setItem(i, 0, QTableWidgetItem(t.get("source", "")))
+                table.setItem(i, 1, QTableWidgetItem(t.get("target", "")))
+                table.setItem(i, 2, QTableWidgetItem(t.get("category", "")))
 
-        refresh_btn = QPushButton("  刷新  ")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.setFixedHeight(34)
-        refresh_btn.clicked.connect(refresh_table)
-        btn_row.addWidget(refresh_btn)
-
-        delete_selected_btn = QPushButton("  删除选中  ")
-        delete_selected_btn.setObjectName("dangerBtn")
-        delete_selected_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        delete_selected_btn.setFixedHeight(34)
-
-        def delete_selected():
-            pair_key = pair_combo.currentData() or ""
-            if not pair_key:
+        def do_delete():
+            rows = set(i.row() for i in table.selectedItems())
+            if not rows:
+                QMessageBox.warning(dlg, "提示", "请先选择要删除的术语。")
                 return
-            parts = pair_key.split("→")
-            sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
-            rows = set(item.row() for item in table.selectedItems())
+            terms = get_terms(source_lang, target_lang)
             for row in sorted(rows, reverse=True):
-                src = table.item(row, 0).text() if table.item(row, 0) else ""
-                delete_term(sl, tl, src)
+                if row < len(terms):
+                    t = terms[row]
+                    delete_term(t.get("source", ""), t.get("target", ""), source_lang, target_lang)
             refresh_table()
 
-        delete_selected_btn.clicked.connect(delete_selected)
-        btn_row.addWidget(delete_selected_btn)
-
-        clear_btn = QPushButton("  清空当前语言对  ")
-        clear_btn.setObjectName("dangerBtn")
-        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        clear_btn.setFixedHeight(34)
-
-        def clear_pair():
-            pair_key = pair_combo.currentData() or ""
-            if not pair_key:
-                return
-            ret = QMessageBox.question(dialog, "确认",
-                f"确定清空 {pair_key} 的所有术语？此操作不可撤销。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        def do_clear():
+            ret = QMessageBox.question(dlg, "确认", "确定要清空当前语言对的所有术语吗？",
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if ret == QMessageBox.StandardButton.Yes:
-                parts = pair_key.split("→")
-                delete_lang_pair(parts[0], parts[1])
+                clear_glossary(source_lang, target_lang)
                 refresh_table()
 
-        clear_btn.clicked.connect(clear_pair)
-        btn_row.addWidget(clear_btn)
+        def do_import():
+            path, _ = QFileDialog.getOpenFileName(dlg, "导入术语", "", "文本文件 (*.txt)")
+            if path:
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    count = import_glossary_from_text(content, source_lang, target_lang)
+                    refresh_table()
+                    QMessageBox.information(dlg, "完成", f"已导入 {count} 条术语。")
+                except Exception as e:
+                    QMessageBox.critical(dlg, "错误", f"导入失败：{str(e)}")
+
+        # 底部按钮
+        btn_row = QHBoxLayout()
         btn_row.addStretch()
+        for text, handler in [("导入术语", do_import), ("删除选中", do_delete), ("清空全部", do_clear)]:
+            b = QPushButton(text)
+            b.setFixedHeight(34)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(handler)
+            btn_row.addWidget(b)
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedHeight(34)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
         main_layout.addLayout(btn_row)
 
-        # 导入术语对话框
-        def do_import():
-            imp_dialog = QDialog(dialog)
-            imp_dialog.setWindowTitle("导入术语")
-            imp_dialog.setMinimumSize(520, 380)
-            imp_dialog.setStyleSheet(f"""
-                QDialog {{
-                    background-color: {C.BG_PAGE};
-                    color: {C.TEXT_PRIMARY};
-                }}
-                QLabel {{
-                    font-size: 13px;
-                    color: {C.TEXT_PRIMARY};
-                    border: none; background: transparent;
-                }}
-                QTextEdit {{
-                    background: {C.BG_CARD};
-                    border: 1px solid {C.BORDER};
-                    border-radius: {C.RADIUS_MD};
-                    padding: 10px 14px;
-                    font-size: 13px;
-                    color: {C.TEXT_PRIMARY};
-                }}
-                QTextEdit:focus {{
-                    border-color: {C.PRIMARY};
-                }}
-                QPushButton#primarySmall {{
-                    background: {C.PRIMARY};
-                    color: #FFFFFF;
-                    border: none;
-                    border-radius: {C.RADIUS_MD};
-                    padding: 8px 20px;
-                    font-size: 13px;
-                    font-weight: 600;
-                }}
-                QPushButton#primarySmall:hover {{
-                    background: {C.PRIMARY_HOVER};
-                }}
-            """)
-
-            imp_card = QFrame()
-            imp_card.setStyleSheet(f"""
-                QFrame {{
-                    background: {C.BG_CARD};
-                    border: 1px solid {C.BORDER_LIGHT};
-                    border-radius: {C.RADIUS_LG};
-                }}
-            """)
-            make_shadow_widget(imp_card, "sm")
-
-            imp_outer = QVBoxLayout(imp_dialog)
-            imp_outer.setContentsMargins(20, 20, 20, 20)
-            imp_outer.addWidget(imp_card)
-
-            imp_layout = QVBoxLayout(imp_card)
-            imp_layout.setSpacing(12)
-            imp_layout.setContentsMargins(24, 24, 24, 24)
-
-            imp_title = QLabel("导入术语")
-            imp_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 15, QFont.Weight.Bold))
-            imp_title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
-            imp_layout.addWidget(imp_title)
-
-            imp_hint = QLabel("每行一条，格式：原文 → 译文")
-            imp_hint.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; border: none; background: transparent;")
-            imp_layout.addWidget(imp_hint)
-
-            imp_text = QTextEdit()
-            imp_text.setPlaceholderText("machine learning → 机器学习\nneural network → 神经网络\nthe state of the art → 最先进的")
-            imp_text.setMinimumHeight(160)
-            imp_layout.addWidget(imp_text)
-
-            imp_result = QLabel("")
-            imp_result.setStyleSheet(f"color: {C.SUCCESS}; font-size: 13px; border: none; background: transparent;")
-            imp_layout.addWidget(imp_result)
-
-            imp_btn_row = QHBoxLayout()
-            imp_btn_row.addStretch()
-
-            def do_import_text():
-                pair_key = pair_combo.currentData() or ""
-                if not pair_key:
-                    return
-                parts = pair_key.split("→")
-                sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
-                added, total = import_glossary_from_text(
-                    imp_text.toPlainText(), sl, tl)
-                imp_result.setText(f"导入完成：新增 {added} 条 / 共解析 {total} 条")
-                refresh_table()
-
-            imp_btn = QPushButton("  确认导入  ")
-            imp_btn.setObjectName("primarySmall")
-            imp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            imp_btn.clicked.connect(do_import_text)
-            imp_btn_row.addWidget(imp_btn)
-            imp_layout.addLayout(imp_btn_row)
-
-            imp_dialog.exec()
-
-        import_btn.clicked.connect(do_import)
-
         refresh_table()
-        dialog.exec()
+        dlg.exec()
 
 
+# ═══════════════════════════════════════════════════════════
+# 入口
+# ═══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    # ── Windows 高 DPI 适配，解决字体模糊 ──
-    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
-    os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
-
     app = QApplication(sys.argv)
-
-    # 强制启用高 DPI 缩放
-    app.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
-    )
-
-    # Windows 下优化字体渲染
-    if sys.platform == "win32":
-        app.setFont(QFont("Microsoft YaHei UI", 9))
-
-    window = MainWindow()
-    window.show()
+    app.setStyle("Fusion")
+    win = MainWindow()
+    win.show()
     sys.exit(app.exec())

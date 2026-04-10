@@ -448,3 +448,17 @@ def import_glossary_from_text(text, source_lang, target_lang):
 
     added, skipped = add_terms_batch(terms, source_lang, target_lang)
     return added, len(terms)
+def clear_glossary(source_lang=None, target_lang=None):
+    """清空术语库"""
+    import json
+    path = os.path.join(os.path.dirname(__file__), "glossary.json")
+    if os.path.exists(path):
+        if source_lang and target_lang:
+            data = load_glossary()
+            key = f"{source_lang.lower()}->{target_lang.lower()}"
+            if key in data:
+                del data[key]
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        else:
+            os.remove(path)
