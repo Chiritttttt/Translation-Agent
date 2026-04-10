@@ -202,53 +202,62 @@ def extract_terms_from_analysis(analysis_text, source_lang, target_lang):
         re.compile(r"^\s{0,6}(\S.{1,60}?)\s*[:：]\s*(.{1,60})$", re.MULTILINE),
     ]
 
-    # 找到术语表段落
+    def _extract_from_lines(lines_to_process):
+        """从行列表中提取术语（复用逻辑，避免重复代码）"""
+        result = []
+        for line in lines_to_process:
+            for pattern in patterns:
+                match = pattern.match(line)
+                if match:
+                    src = match.group(1).strip().strip("*").strip()
+                    tgt = match.group(2).strip().strip("*").strip()
+                    if len(src) <= 80 and len(tgt) <= 80 and not src.startswith("#"):
+                        src = re.sub(r"^[`*\-]+\s*", "", src)
+                        src = re.sub(r"\s*[`*]+$", "", src)
+                        tgt = re.sub(r"^[`*\-]+\s*", "", tgt)
+                        tgt = re.sub(r"\s*[`*]+$", "", tgt)
+                        if src and tgt and src.lower() != tgt.lower():
+                            cat = "术语"
+                            if any(w in src.lower() for w in ["the ", "a ", "an ", "is ", "are ", " to "]):
+                                cat = "表达"
+                            result.append({"source": src, "target": tgt, "category": cat})
+                    break
+        return result
+
+    # ── 第一阶段：从术语表段落中提取 ──
     lines = analysis_text.split("\n")
     in_terms_section = False
     term_lines = []
 
     for line in lines:
         stripped = line.strip()
-        # 检测术语表段落的开始
-        if "术语" in stripped and ("表" in stripped or "词汇" in stripped or "表达" in stripped):
-            in_terms_section = True
-            continue
-        # 检测下一个 ## 标题，表示术语表段落结束
-        if in_terms_section and stripped.startswith("##"):
-            if "术语" in stripped:
-                continue  # 仍是术语相关标题
+        # Bug fix: 放宽术语段落检测，兼容分段分析的 "### 第 N/M 段补充术语" 格式
+        if "术语" in stripped or ("词汇" in stripped) or ("表达" in stripped and "惯用" in stripped):
+            # 排除描述性文字（如"这些术语很重要"），必须是标题行
+            if stripped.startswith("#") or "表" in stripped or "补充" in stripped:
+                in_terms_section = True
+                continue
+        # 检测下一个 ## / ### 非术语标题，表示段落结束
+        if in_terms_section and (stripped.startswith("## ") or stripped.startswith("### ")):
+            if "术语" in stripped or "词汇" in stripped:
+                continue  # 仍是术语相关标题（如 "### 第 2/3 段补充术语"）
             else:
                 in_terms_section = False
                 continue
         if in_terms_section and stripped:
-            # 跳过纯描述行（不含 → / : / / 的短行）
             if any(c in stripped for c in ["→", "➡", ">", "：", ":", "／", "/"]) and not stripped.startswith("#"):
                 term_lines.append(stripped)
 
-    # 也对全文做一次匹配（兜底，以防格式不标准）
-    all_matchable = analysis_text
+    terms = _extract_from_lines(term_lines)
 
-    # 从术语表段落中提取
-    for line in term_lines:
-        for pattern in patterns:
-            match = pattern.match(line)
-            if match:
-                src = match.group(1).strip().strip("*").strip()
-                tgt = match.group(2).strip().strip("*").strip()
-                # 过滤掉太长或不合理的匹配
-                if len(src) <= 80 and len(tgt) <= 80 and not src.startswith("#"):
-                    # 清理可能的前后标记
-                    src = re.sub(r"^[`*\-]+\s*", "", src)
-                    src = re.sub(r"\s*[`*]+$", "", src)
-                    tgt = re.sub(r"^[`*\-]+\s*", "", tgt)
-                    tgt = re.sub(r"\s*[`*]+$", "", tgt)
-                    if src and tgt and src.lower() != tgt.lower():
-                        # 判断分类
-                        cat = "术语"
-                        if any(w in src.lower() for w in ["the ", "a ", "an ", "is ", "are ", " to "]):
-                            cat = "表达"
-                        terms.append({"source": src, "target": tgt, "category": cat})
-                    break
+    # ── 第二阶段：全文兜底匹配 ──
+    # 段落检测可能遗漏非标准格式，对全文做一次兜底
+    all_lines = [l.strip() for l in analysis_text.split("\n")]
+    fallback_lines = [l for l in all_lines
+                      if l.startswith("-") or l.startswith("•")
+                      if any(c in l for c in ["→", "➡", ">", "/", "／"])
+                      if len(l) <= 200]
+    terms.extend(_extract_from_lines(fallback_lines))
 
     # 去重
     seen = set()
