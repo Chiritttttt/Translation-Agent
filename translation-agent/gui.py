@@ -863,10 +863,12 @@ class MainWindow(QMainWindow):
             col.setSpacing(6)
             lbl = QLabel(lbl_text)
             lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            lbl.setFixedHeight(18)
             col.addWidget(lbl)
             cb = QComboBox()
             cb.addItems(items)
             cb.setFixedHeight(38)
+            cb.setMinimumWidth(130)
             setattr(self, attr, cb)
             col.addWidget(cb)
             sl.addLayout(col)
@@ -879,10 +881,12 @@ class MainWindow(QMainWindow):
             col.setSpacing(6)
             lbl = QLabel(lbl_text)
             lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            lbl.setFixedHeight(18)
             col.addWidget(lbl)
             le = QLineEdit()
             le.setPlaceholderText(ph)
             le.setFixedHeight(38)
+            le.setMinimumWidth(130)
             setattr(self, attr, le)
             col.addWidget(le)
             sl.addLayout(col)
@@ -1166,8 +1170,8 @@ class MainWindow(QMainWindow):
 
         self.worker = TranslateWorker(
             source_text=source_text,
-            source_lang=self.source_lang.currentText(),
-            target_lang=self.target_lang.currentText(),
+            source_lang=self._get_source_lang(),
+            target_lang=self._get_target_lang(),
             style=self.style_input.text(),
             audience=self.audience_input.text(),
         )
@@ -1206,11 +1210,17 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("")
         self.translate_btn.setEnabled(True)
 
+    def _get_source_lang(self):
+        return self.source_lang.currentText() if hasattr(self, 'source_lang') and self.source_lang else "English"
+
+    def _get_target_lang(self):
+        return self.target_lang.currentText() if hasattr(self, 'target_lang') and self.target_lang else "Chinese"
+
     def export_glossary(self):
         """导出术语库（只包含词汇和表达，不含分析报告全文）"""
         from glossary import export_glossary_text, get_terms
-        source_lang = self.source_lang.currentText()
-        target_lang = self.target_lang.currentText()
+        source_lang = self._get_source_lang()
+        target_lang = self._get_target_lang()
         terms = get_terms(source_lang, target_lang)
         if not terms:
             QMessageBox.information(self, "提示",
@@ -1291,6 +1301,28 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "失败", str(e))
 
+    def _get_export_suffix(self):
+        """根据源语言/目标语言生成 EC/CE 后缀。
+        中译英 = CE (Chinese→English)，英译中 = EC (English→Chinese)
+        其他语言对统一用方向缩写。"""
+        sl = self.source_lang.currentText().lower()
+        tl = self.target_lang.currentText().lower()
+        if sl == "chinese" and tl == "english":
+            return "CE"
+        elif sl == "english" and tl == "chinese":
+            return "EC"
+        else:
+            return f"{sl[:2].upper()}{tl[:2].upper()}"
+
+    def _get_default_export_name(self, fmt):
+        """生成默认导出文件名：原文件名-EC/CE-agent.fmt"""
+        suffix = self._get_export_suffix()
+        if self.file_path and os.path.exists(self.file_path):
+            name = os.path.splitext(os.path.basename(self.file_path))[0]
+            return f"{name}-{suffix}-agent.{fmt}"
+        else:
+            return f"translation-{suffix}-agent.{fmt}"
+
     def do_export(self):
         if not self.last_result:
             QMessageBox.warning(self, "提示", "请先完成翻译。")
@@ -1302,9 +1334,10 @@ class MainWindow(QMainWindow):
 
         fmt = dialog.get_fmt()
         mode = dialog.get_mode()
+        default_name = self._get_default_export_name(fmt)
 
         out_path, _ = QFileDialog.getSaveFileName(
-            self, "保存文件", f"translation.{fmt}",
+            self, "保存文件", default_name,
             f"{fmt.upper()} 文件 (*.{fmt})"
         )
         if not out_path:
