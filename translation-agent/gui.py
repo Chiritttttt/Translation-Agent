@@ -410,6 +410,51 @@ def arco_global_stylesheet():
     QTableWidget QTableWidget {{
         border-radius: 0px;
     }}
+
+    /* ── 消息对话框 (QMessageBox) ── */
+    QMessageBox {{
+        background-color: {C.BG_CARD};
+        color: {C.TEXT_PRIMARY};
+    }}
+    QMessageBox QLabel {{
+        color: {C.TEXT_PRIMARY};
+        font-size: 14px;
+        font-weight: 400;
+        background: transparent;
+        border: none;
+        padding: 0;
+        margin: 0;
+        min-width: 320px;
+        min-height: 24px;
+    }}
+    QMessageBox QLabel#qt_msgbox_label {{
+        color: {C.TEXT_PRIMARY};
+        font-size: 14px;
+        background: transparent;
+    }}
+    QMessageBox QPushButton {{
+        background: {C.PRIMARY};
+        color: #FFFFFF;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 24px;
+        font-size: 14px;
+        font-weight: 600;
+        min-width: 80px;
+        min-height: 32px;
+    }}
+    QMessageBox QPushButton:hover {{
+        background: {C.PRIMARY_HOVER};
+    }}
+    QMessageBox QPushButton:pressed {{
+        background: {C.PRIMARY_ACTIVE};
+    }}
+
+    /* ── 对话框 (QDialog) 兜底 ── */
+    QDialog {{
+        background-color: {C.BG_PAGE};
+        color: {C.TEXT_PRIMARY};
+    }}
     """
 
 
@@ -932,24 +977,82 @@ class MainWindow(QMainWindow):
         layout.addWidget(settings_title)
         layout.addWidget(sg)
 
-        for lbl_text, items, attr in [
-            ("源语言", ["English","Chinese","Japanese"], "source_lang"),
-            ("目标语言", ["Chinese","English","Japanese"], "target_lang"),
-        ]:
-            col = QVBoxLayout()
-            col.setSpacing(6)
-            lbl = QLabel(lbl_text)
-            lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
-            lbl.setFixedHeight(18)
-            col.addWidget(lbl)
-            cb = QComboBox()
-            cb.addItems(items)
-            cb.setFixedHeight(38)
-            cb.setMinimumWidth(130)
-            setattr(self, attr, cb)
-            col.addWidget(cb)
-            sl.addLayout(col)
+        # ── 语言选择区 ──
+        # 左：源语言 | 中：交换按钮 | 右：目标语言
+        lang_row = QHBoxLayout()
+        lang_row.setSpacing(12)
 
+        # 源语言
+        src_col = QVBoxLayout()
+        src_col.setSpacing(6)
+        src_lbl = QLabel("🌐  源语言")
+        src_lbl.setStyleSheet(f"color: {C.TEXT_REGULAR}; font-size: 13px; font-weight: 600; border: none; background: transparent;")
+        src_lbl.setFixedHeight(20)
+        src_col.addWidget(src_lbl)
+        self.source_lang = QComboBox()
+        self.source_lang.addItems(["English", "Chinese", "Japanese", "Korean", "French", "German", "Spanish"])
+        self.source_lang.setFixedHeight(40)
+        self.source_lang.setMinimumWidth(160)
+        self.source_lang.setCursor(Qt.CursorShape.PointingHandCursor)
+        src_col.addWidget(self.source_lang)
+        lang_row.addLayout(src_col, stretch=1)
+
+        # 交换按钮
+        swap_btn = QPushButton("⇄")
+        swap_btn.setFixedSize(40, 40)
+        swap_btn.setObjectName("textBtn")
+        swap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        swap_btn.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        swap_btn.setToolTip("交换源语言和目标语言")
+        swap_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.FILL1};
+                color: {C.TEXT_SECONDARY};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: 20px;
+            }}
+            QPushButton:hover {{
+                background: {C.PRIMARY_LIGHT};
+                color: {C.PRIMARY};
+                border-color: {C.PRIMARY};
+            }}
+        """)
+
+        def swap_languages():
+            src_idx = self.source_lang.currentIndex()
+            tgt_idx = self.target_lang.currentIndex()
+            self.source_lang.setCurrentIndex(tgt_idx)
+            self.target_lang.setCurrentIndex(src_idx)
+
+        swap_btn.clicked.connect(swap_languages)
+        lang_row.addWidget(swap_btn, stretch=0, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        # 目标语言
+        tgt_col = QVBoxLayout()
+        tgt_col.setSpacing(6)
+        tgt_lbl = QLabel("🎯  目标语言")
+        tgt_lbl.setStyleSheet(f"color: {C.TEXT_REGULAR}; font-size: 13px; font-weight: 600; border: none; background: transparent;")
+        tgt_lbl.setFixedHeight(20)
+        tgt_col.addWidget(tgt_lbl)
+        self.target_lang = QComboBox()
+        self.target_lang.addItems(["Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish"])
+        self.target_lang.setFixedHeight(40)
+        self.target_lang.setMinimumWidth(160)
+        self.target_lang.setCursor(Qt.CursorShape.PointingHandCursor)
+        tgt_col.addWidget(self.target_lang)
+        lang_row.addLayout(tgt_col, stretch=1)
+
+        sl.addLayout(lang_row)
+        sl.addSpacing(8)
+
+        # 右侧分隔线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setStyleSheet(f"background-color: {C.BORDER_LIGHT}; border: none;")
+        sep.setFixedWidth(1)
+        sl.addWidget(sep)
+
+        # ── 风格 & 读者 ──
         for lbl_text, ph, attr in [
             ("风格", "formal / conversational / technical / auto", "style_input"),
             ("目标读者", "general / technical / academic / business", "audience_input"),
