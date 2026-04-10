@@ -11,31 +11,55 @@ import os
 
 
 def clean_subtitle_entry(text: str) -> str:
-    """清洗单条字幕文本"""
-    # 去除 HTML 标签
-    text = re.sub(r'<[^>]+>', '', text)
-    # 去除 ASS/SSA 样式标签 {\xxx}
-    text = re.sub(r'\{\\[^}]*\}', '', text)
-    # 去除残留空大括号
-    text = re.sub(r'\{\}', '', text)
-    # 去除音乐符号 ♪
+    """清洗单条字幕文本，去除所有格式标记，保留纯文本。"""
+    # ── 去除 ASS/SSA 覆盖标签 {\xxx}（可能嵌套大括号） ──
+    # 先处理简单的 {\xxx} 模式
+    text = re.sub(r'\{[^}]*\}', '', text)
+    # 多次处理直到没有嵌套残留（最多 5 轮）
+    for _ in range(5):
+        new_text = re.sub(r'\{[^}]*\}', '', text)
+        if new_text == text:
+            break
+        text = new_text
+
+    # ── 去除 HTML 标签（含自闭标签 <br/> <font ...> 等） ──
+    text = re.sub(r'<[^>]*>', '', text)
+    # 处理未闭合标签（如 <i 或 <b 残留）
+    text = re.sub(r'</?(?:i|b|u|font|span|div|c|N|n|highlight)\b[^>]*', '', text, flags=re.IGNORECASE)
+
+    # ── 去除 ASS 样式转义序列 ──
+    text = re.sub(r'\\[nNrN]', '\n', text)       # \N → 换行
+    text = re.sub(r'\\[hab]', ' ', text)          # \h \a \b → 空格
+    text = re.sub(r'\\[xy][\dabcdefABCDEF]{4}', '', text)  # \xNNNN 彩色字符
+
+    # ── 去除音符和特殊符号 ──
     text = text.replace('♪', '').replace('♫', '')
-    # 去除全角空格
+    text = text.replace('♩', '').replace('♬', '')
+
+    # ── 去除全角空格 ──
     text = text.replace('\u3000', ' ')
-    # 合并多个空格为一个
+
+    # ── 合并多余空格和换行 ──
     text = re.sub(r' {2,}', ' ', text)
-    # 去除首尾空白
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    # ── 去除首尾空白 ──
     text = text.strip()
+
     return text
 
 
 def clean_subtitle_file(subtitle) -> object:
     """
     清洗字幕文件：
-    1. 去除头部信息、注释、HTML标签、样式声明
-    2. 合并相邻重复行
-    3. 时间统一转为 SRT 格式 (00:00:00,000)
-    4. 重编号
+    1. 清洗每条字幕文本（去除 HTML/ASS 标签、样式、特殊符号）
+    2. 去除纯空行条目（无实际内容）
+    3. 合并相邻重复文本行（扩展时间范围）
+    4. 去除过短的噪声条目（少于 1 个有效字符，排除纯标点）
+    5. 按时间排序
+    6. 去除时间重叠（保留较早开始的条目）
+    7. 时间统一转为 SRT 格式 (HH:MM:SS,mmm)
+    8. 重编号
 
     参数: subtitle - SubtitleFile 对象
     返回: 清洗后的 SubtitleFile 对象（原地修改并返回）
@@ -47,39 +71,71 @@ def clean_subtitle_file(subtitle) -> object:
     for entry in subtitle.entries:
         entry.text = clean_subtitle_entry(entry.text)
 
-    # ── 2. 合并相邻重复行 ──
-    merged = []
-    prev_text = None
-    for entry in subtitle.entries:
-        if entry.text == prev_text and entry.text.strip() == '':
-            # 跳过连续的空行
-            continue
-        if entry.text.strip() == '':
-            merged.append(entry)
-            prev_text = entry.text
-            continue
-        # 合并文本完全相同的相邻行（非空），合并时间范围
-        if prev_text is not None and entry.text == prev_text and merged:
-            # 扩展上一条的结束时间
-            prev = merged[-1]
-            prev.end_time = entry.end_time
-        else:
-            merged.append(entry)
-            prev_text = entry.text
-    subtitle.entries = merged
-
-    # ── 3. 去除纯注释行（以 # 开头或 <i> 等残留） ──
+    # ── 2. 去除纯空行条目 ──
     subtitle.entries = [
         e for e in subtitle.entries
-        if e.text.strip() != '' or e.start_time != e.end_time
+        if e.text.strip() != ''
     ]
 
-    # ── 4. 时间统一为 SRT 格式 (HH:MM:SS,mmm) ──
+    # ── 3. 合并相邻重复文本行 ──
+    if len(subtitle.entries) > 1:
+        merged = []
+        for entry in subtitle.entries:
+            if merged and entry.text == merged[-1].text and entry.text.strip():
+                # 文本相同且非空：扩展上一条的结束时间
+                merged[-1].end_time = entry.end_time
+            else:
+                merged.append(entry)
+        subtitle.entries = merged
+
+    # ── 4. 去除过短的噪声条目（纯标点/单个符号不算有效内容） ──
+    def _is_noise(text):
+        t = text.strip()
+        if not t:
+            return True
+        # 纯标点/符号
+        if re.match(r'^[\s\.\,\;\:\!\?\-\_\=\+\*\&\^\%\$\#\@\~\`\|\\\/\<\>\(\)\[\]\{\}\'"\"\u3000-\u303F\uFF00-\uFFEF]+$', t):
+            return True
+        return False
+
+    subtitle.entries = [e for e in subtitle.entries if not _is_noise(e.text)]
+
+    # ── 5. 按开始时间排序 ──
+    def _time_to_ms(entry):
+        try:
+            ts = entry.start_time.strip()
+            ts = ts.replace(',', '.')
+            m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})\.(\d{1,3})$', ts)
+            if m:
+                h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                frac = m.group(4)
+                if len(frac) == 2:
+                    frac = frac + '0'
+                elif len(frac) == 1:
+                    frac = frac + '00'
+                ms = int(frac[:3])
+                return h * 3600000 + mi * 60000 + s * 1000 + ms
+        except Exception:
+            pass
+        return 0
+
+    subtitle.entries.sort(key=_time_to_ms)
+
+    # ── 6. 去除时间重叠 ──
+    deduped = []
+    for entry in subtitle.entries:
+        if deduped and _time_to_ms(entry) < _time_to_ms(deduped[-1]):
+            # 开始时间早于上一条 → 跳过（时间重叠）
+            continue
+        deduped.append(entry)
+    subtitle.entries = deduped
+
+    # ── 7. 时间统一为 SRT 格式 (HH:MM:SS,mmm) ──
     for entry in subtitle.entries:
         entry.start_time = _normalize_timestamp(entry.start_time)
         entry.end_time = _normalize_timestamp(entry.end_time)
 
-    # ── 5. 重编号 ──
+    # ── 8. 重编号 ──
     for i, entry in enumerate(subtitle.entries, start=1):
         entry.index = i
 
@@ -246,7 +302,7 @@ def _ms_to_ass_time(ms):
 # ═══════════════════════════════════════════════════════════
 
 def parse_srt(text):
-    """解析 SRT 字幕文件"""
+    """解析 SRT 字幕文件（兼容 VTT 风格时间戳）"""
     sub = SubtitleFile(format_type="srt")
     blocks = re.split(r"\n\s*\n", text.strip())
     index = 0
@@ -254,6 +310,10 @@ def parse_srt(text):
     for block in blocks:
         lines = block.strip().split("\n")
         if len(lines) < 2:
+            continue
+
+        # 跳过头部注释行
+        if lines[0].strip().startswith('#'):
             continue
 
         time_line_idx = -1
@@ -266,8 +326,9 @@ def parse_srt(text):
             continue
 
         time_line = lines[time_line_idx]
+        # 兼容 SRT (00:01:23,456) 和 VTT 风格 (0:01:23.456 / 00:01:23.456)
         match = re.match(
-            r"(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})",
+            r"(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})\s*-->\s*(\d{1,2}:\d{2}:\d{2}[,\.]\d{1,3})",
             time_line.strip()
         )
         if not match:
@@ -276,6 +337,7 @@ def parse_srt(text):
         start = match.group(1).replace(".", ",")
         end = match.group(2).replace(".", ",")
 
+        # 序号行：必须是纯数字行（跳过位置 ID 等非数字行）
         if time_line_idx > 0 and lines[time_line_idx - 1].strip().isdigit():
             seq = int(lines[time_line_idx - 1].strip())
         else:
