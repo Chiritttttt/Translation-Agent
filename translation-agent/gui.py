@@ -73,8 +73,9 @@ class ArcoColors:
     RADIUS_MD = "8px"
     RADIUS_LG = "12px"
 
-    # ── 字体 ──
-    FONT_FAMILY = "'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif"
+    # ── 字体（Windows 优先中文字体，避免模糊） ──
+    FONT_FAMILY = "'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', 'Segoe UI', sans-serif"
+    FONT_FAMILY_EN = "'Segoe UI', 'Microsoft YaHei UI', -apple-system, sans-serif"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -86,8 +87,10 @@ def arco_global_stylesheet():
     /* ── 全局 ── */
     QWidget {{
         font-family: {C.FONT_FAMILY};
-        font-size: 14px;
+        font-size: 13px;
         color: {C.TEXT_PRIMARY};
+        font-weight: 400;
+        letter-spacing: 0.2px;
     }}
 
     /* ── 主窗口 ── */
@@ -250,49 +253,52 @@ def arco_global_stylesheet():
         font-weight: 600;
     }}
 
-    /* ── 主按钮 (Primary) ── */
+    /* ── 主按钮 (Primary) — 渐变 + 阴影感 ── */
     QPushButton#primaryBtn {{
-        background: {C.PRIMARY};
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3370FF, stop:1 #165DFF);
         color: #FFFFFF;
         border: none;
-        border-radius: {C.RADIUS_MD};
-        padding: 10px 24px;
-        font-size: 15px;
+        border-radius: 8px;
+        padding: 10px 28px;
+        font-size: 14px;
         font-weight: 600;
+        letter-spacing: 1px;
     }}
     QPushButton#primaryBtn:hover {{
-        background: {C.PRIMARY_HOVER};
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4080FF, stop:1 #2666FF);
     }}
     QPushButton#primaryBtn:pressed {{
-        background: {C.PRIMARY_ACTIVE};
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0E42D2, stop:1 #165DFF);
     }}
     QPushButton#primaryBtn:disabled {{
         background: {C.FILL3};
         color: {C.TEXT_DISABLED};
     }}
 
-    /* ── 次按钮 (Secondary/Outline) ── */
+    /* ── 次按钮 (Outline) — 带微光背景 ── */
     QPushButton#outlineBtn {{
-        background: transparent;
+        background: {C.BG_CARD};
         color: {C.TEXT_REGULAR};
         border: 1px solid {C.BORDER};
-        border-radius: {C.RADIUS_MD};
-        padding: 8px 16px;
+        border-radius: 8px;
+        padding: 8px 18px;
         font-size: 13px;
         font-weight: 500;
     }}
     QPushButton#outlineBtn:hover {{
         color: {C.PRIMARY};
-        border-color: {C.PRIMARY};
-        background: {C.PRIMARY_LIGHT2};
+        border-color: #A9C7FF;
+        background: {C.PRIMARY_LIGHT};
     }}
     QPushButton#outlineBtn:pressed {{
         color: {C.PRIMARY_ACTIVE};
-        border-color: {C.PRIMARY_ACTIVE};
+        border-color: {C.PRIMARY};
+        background: #D6E4FF;
     }}
     QPushButton#outlineBtn:disabled {{
         color: {C.TEXT_DISABLED};
         border-color: {C.BORDER_LIGHT};
+        background: {C.FILL1};
     }}
 
     /* ── 文字按钮 (Text) ── */
@@ -312,28 +318,29 @@ def arco_global_stylesheet():
         color: {C.TEXT_DISABLED};
     }}
 
-    /* ── 普通按钮 (兜底，无 objectName 的) ── */
+    /* ── 普通按钮 (兜底) ── */
     QPushButton {{
-        background: transparent;
+        background: {C.BG_CARD};
         color: {C.TEXT_REGULAR};
         border: 1px solid {C.BORDER};
-        border-radius: {C.RADIUS_MD};
-        padding: 8px 16px;
+        border-radius: 8px;
+        padding: 8px 18px;
         font-size: 13px;
         font-weight: 500;
     }}
     QPushButton:hover {{
         color: {C.PRIMARY};
-        border-color: {C.PRIMARY};
-        background: {C.PRIMARY_LIGHT2};
+        border-color: #A9C7FF;
+        background: {C.PRIMARY_LIGHT};
     }}
     QPushButton:pressed {{
         color: {C.PRIMARY_ACTIVE};
-        border-color: {C.PRIMARY_ACTIVE};
+        border-color: {C.PRIMARY};
     }}
     QPushButton:disabled {{
         color: {C.TEXT_DISABLED};
         border-color: {C.BORDER_LIGHT};
+        background: {C.FILL1};
     }}
 
     /* ── 进度条 ── */
@@ -1765,7 +1772,22 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # ── Windows 高 DPI 适配，解决字体模糊 ──
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
+
     app = QApplication(sys.argv)
+
+    # 强制启用高 DPI 缩放
+    app.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
+
+    # Windows 下优化字体渲染
+    if sys.platform == "win32":
+        app.setFont(QFont("Microsoft YaHei UI", 9))
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
