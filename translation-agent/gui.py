@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QLineEdit, QTextEdit, QPushButton, QFileDialog,
     QTabWidget, QMessageBox, QGroupBox, QProgressBar, QDialog,
     QRadioButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-    QHeaderView, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTableWidget, QTableWidgetItem, QGridLayout,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
