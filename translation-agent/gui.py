@@ -834,65 +834,239 @@ def step5_final(draft, critique, target_lang):
 # 字幕翻译线程
 # ═══════════════════════════════════════════════════════════
 class SubtitleWorker(QThread):
-    """字幕翻译：逐条翻译，保留时间轴"""
+    """字幕翻译：分析 → 初译 → 审校 → 终稿，保留时间轴"""
     progress = pyqtSignal(str, int)
-    finished = pyqtSignal(object, list)  # SubtitleFile, translated_texts
+    analysis_done = pyqtSignal(str)          # AI 分析报告
+    critique_done = pyqtSignal(str)          # AI 审校报告
+    finished = pyqtSignal(object, list)      # SubtitleFile, translated_texts
     error = pyqtSignal(str)
 
-    def __init__(self, subtitle, source_lang, target_lang):
+    def __init__(self, subtitle, source_lang, target_lang,
+                 style="", audience=""):
         super().__init__()
         self.subtitle = subtitle
         self.source_lang = source_lang
         self.target_lang = target_lang
+        self.style = style or ""
+        self.audience = audience or ""
 
+    # ── 第一步：AI 分析字幕内容 ──
+    def _step_analyze(self, source_text):
+        sys_prompt = """你是专业翻译前置分析师，当前任务是对字幕文本进行分析。
+字幕文本每行是一条字幕，格式如 [001] Hello world。
+输出严格按照以下固定Markdown结构：
+## 概要
+## 术语表（原文 → 译法）
+请逐行列出所有专业术语、缩写、惯用表达、专有名词。
+格式要求：每行一条，用 → 连接，例如：
+- machine learning → 机器学习
+- large language model → 大语言模型
+## 语气与风格判定
+## 读者理解难点 & 文化注解点
+## 修辞隐喻与替换映射
+"""
+        user_prompt = f"""
+源语言：{self.source_lang}
+目标语言：{self.target_lang}
+目标读者：{self.audience or "普通观众"}
+风格模式：{self.style or "auto"}
+这是字幕文件，每行代表一条字幕，请基于字幕文本内容进行分析。
+
+原文：
+{source_text[:8000]}
+"""
+        return chat(sys_prompt, user_prompt, temperature=0.2)
+
+    # ── 第二步：组装翻译提示 ──
+    def _step_build_prompt(self, analysis):
+        from glossary import get_glossary_prompt_block
+
+        if self.style == "auto" or not self.style.strip():
+            style_block = f"""The source text's tone is extracted from analysis above.
+Reproduce this tone faithfully in {self.target_lang}. Match register, rhythm, personality exactly.
+字幕翻译要求：每行一条，简洁自然，适合屏幕阅读。"""
+        else:
+            style_block = f"""{self.style}
+Apply this style consistently across full text.
+字幕翻译要求：每行一条，简洁自然，适合屏幕阅读。"""
+
+        glossary_block = get_glossary_prompt_block(self.source_lang, self.target_lang)
+
+        prompt_full = f"""You are a professional subtitle translator translating from {self.source_lang} to {self.target_lang}.
+Think and reason entirely in {self.target_lang}.
+
+## Target Audience
+{self.audience or "general viewers"}
+
+## Translation Style
+{style_block}
+
+{glossary_block}
+
+## Content Background
+{analysis}
+
+## Subtitle Translation Principles
+- Translate EACH line independently, output EXACTLY the same number of lines
+- Keep translations concise and natural — suitable for on-screen subtitle reading
+- No omission, no summarization
+- Cultural terms add brief explanation in parentheses
+- Do NOT add explanations, notes, or comments
+- Do NOT merge or split lines
+"""
+        return prompt_full
+
+    # ── 第三步：初译 ──
+    def _step_translate(self, prompt):
+        from subtitle_handler import (
+            parse_subtitle_translation_response,
+            _apply_translations,
+        )
+        batch_size = 50
+        all_translated = []
+        entries_with_text = [e for e in self.subtitle.entries if e.text.strip()]
+        total_batches = (len(entries_with_text) + batch_size - 1) // batch_size
+
+        for batch_idx in range(total_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, len(entries_with_text))
+            batch_entries = entries_with_text[start:end]
+
+            self.progress.emit(
+                f"初译字幕 {start+1}-{end}/{len(entries_with_text)}...",
+                3 + int(1 * batch_idx / max(total_batches, 1)))
+
+            batch_input = "\n".join(
+                f"[{i+1:03d}] {e.text}" for i, e in enumerate(batch_entries))
+
+            sub_cmd = """Follow all rules above. Translate each numbered line COMPLETELY.
+Keep the [NNN] prefix in your response. Only output translated lines, nothing else."""
+            response = chat(prompt + "\n" + sub_cmd, batch_input, temperature=0.3)
+            batch_translated = parse_subtitle_translation_response(
+                response, len(batch_entries))
+            all_translated.extend(batch_translated)
+
+        _apply_translations(self.subtitle, all_translated)
+        return all_translated
+
+    # ── 第四步：审校 ──
+    def _step_critique(self, source_text, draft_text, analysis):
+        max_len = 6000
+        src_chunks = [source_text[i:i+max_len] for i in range(0, len(source_text), max_len)]
+        draft_chunks = [draft_text[i:i+max_len] for i in range(0, len(draft_text), max_len)]
+        pairs = []
+        for i in range(max(len(src_chunks), len(draft_chunks))):
+            s = src_chunks[i] if i < len(src_chunks) else ""
+            d = draft_chunks[i] if i < len(draft_chunks) else ""
+            if s or d:
+                pairs.append((s, d))
+
+        critiques = []
+        for idx, (src_part, draft_part) in enumerate(pairs):
+            part_label = f"（第 {idx+1}/{len(pairs)} 段）" if len(pairs) > 1 else ""
+            critique = chat(
+                "你是严格的翻译审校专家，当前审校对象是字幕翻译。",
+                f"""审校{self.source_lang}→{self.target_lang}字幕译文{part_label}，输出诊断报告：
+## 准确性与完整性
+## 翻译腔问题（原句 → 建议）
+## 修辞与情感保真
+## 表达与逻辑
+## 总结
+只列出问题，不要自行改写译文原文。
+
+原文：\n{src_part}
+译文：\n{draft_part}
+分析要点：\n{analysis[:2000]}"""
+            )
+            critiques.append(critique)
+
+        return "\n\n---\n\n".join(critiques)
+
+    # ── 第五步：终稿润色 ──
+    def _step_final(self, draft_text, critique):
+        max_len = 6000
+        draft_chunks = [draft_text[i:i+max_len] for i in range(0, len(draft_text), max_len)]
+
+        if len(draft_chunks) <= 1:
+            return chat(
+                f"你是{self.target_lang}母语精修专家，当前润色对象是字幕翻译，严格依据审校报告逐条修正",
+                f"""逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
+只输出最终纯净定稿译文（保持 [NNN] 编号格式）：
+初译：{draft_text}
+审校：{critique}"""
+            )
+
+        critique_chunks = [critique[i:i+max_len] for i in range(0, len(critique), max_len)]
+        final_parts = []
+        for idx, draft_part in enumerate(draft_chunks):
+            crit_part = critique_chunks[idx] if idx < len(critique_chunks) else critique_chunks[-1] if critique_chunks else ""
+            result = chat(
+                f"你是{self.target_lang}母语精修专家，当前润色对象是字幕翻译，严格依据审校报告逐条修正",
+                f"""以下是第 {idx+1}/{len(draft_chunks)} 段的修正任务。
+逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
+只输出这一段的最终纯净定稿译文（保持 [NNN] 编号格式）：
+初译段落：{draft_part}
+审校参考：{crit_part}"""
+            )
+            final_parts.append(result)
+
+        return "\n".join(final_parts)
+
+    # ── 主流程 ──
     def run(self):
         try:
             from subtitle_handler import (
-                build_subtitle_translate_prompt,
-                format_subtitle_for_translation,
                 parse_subtitle_translation_response,
                 _apply_translations,
             )
-            from glossary import get_glossary_prompt_block
+            from glossary import extract_terms_from_analysis, add_terms_batch
 
-            self.progress.emit("准备字幕翻译...", 1)
-
-            sys_prompt = build_subtitle_translate_prompt(
-                self.source_lang, self.target_lang)
-
-            glossary_block = get_glossary_prompt_block(
-                self.source_lang, self.target_lang)
-            if glossary_block:
-                sys_prompt += "\n\n" + glossary_block
-
-            batch_size = 50
-            all_translated = []
             entries_with_text = [e for e in self.subtitle.entries if e.text.strip()]
-            total_batches = (len(entries_with_text) + batch_size - 1) // batch_size
+            source_text = "\n".join(
+                f"[{i+1:03d}] {e.text}" for i, e in enumerate(entries_with_text))
 
-            for batch_idx in range(total_batches):
-                start = batch_idx * batch_size
-                end = min(start + batch_size, len(entries_with_text))
-                batch_entries = entries_with_text[start:end]
+            # ── 第一步：深度分析 ──
+            self.progress.emit("第一步：深度分析字幕内容...", 1)
+            analysis = self._step_analyze(source_text)
+            self.analysis_done.emit(analysis)
 
-                self.progress.emit(
-                    f"翻译字幕 {start+1}-{end}/{len(entries_with_text)}...",
-                    2 + int(3 * batch_idx / max(total_batches, 1)))
+            # 术语自动入库
+            new_terms = extract_terms_from_analysis(analysis, self.source_lang, self.target_lang)
+            if new_terms:
+                added, _ = add_terms_batch(new_terms, self.source_lang, self.target_lang)
+                self.progress.emit(f"术语入库：新增 {added} 条", 1)
 
-                batch_input = "\n".join(
-                    f"[{i+1:03d}] {e.text}" for i, e in enumerate(batch_entries))
+            # ── 第二步：组装提示 ──
+            self.progress.emit("第二步：组装翻译提示...", 2)
+            prompt = self._step_build_prompt(analysis)
 
-                response = chat(sys_prompt, batch_input, temperature=0.3)
-                batch_translated = parse_subtitle_translation_response(
-                    response, len(batch_entries))
+            # ── 第三步：初译 ──
+            self.progress.emit("第三步：初译字幕...", 3)
+            all_translated = self._step_translate(prompt)
 
-                all_translated.extend(batch_translated)
+            # 构建完整译文文本（用于审校）
+            draft_text = "\n".join(
+                f"[{i+1:03d}] {t}" for i, t in enumerate(all_translated))
 
-            _apply_translations(self.subtitle, all_translated)
+            # ── 第四步：审校 ──
+            self.progress.emit("第四步：审校译文...", 4)
+            critique = self._step_critique(source_text, draft_text, analysis)
+            self.critique_done.emit(critique)
+
+            # ── 第五步：终稿润色 ──
+            self.progress.emit("第五步：终稿润色...", 5)
+            final_text = self._step_final(draft_text, critique)
+
+            # 将终稿结果重新应用到字幕对象
+            final_translated = parse_subtitle_translation_response(
+                final_text, len(entries_with_text))
+            _apply_translations(self.subtitle, final_translated)
+
             self.progress.emit("字幕翻译完成！", 5)
-            self.finished.emit(self.subtitle, all_translated)
+            self.finished.emit(self.subtitle, final_translated)
 
         except Exception as e:
+            logger.exception("字幕翻译异常")
             self.error.emit(str(e))
 
 
@@ -1958,8 +2132,12 @@ class MainWindow(QMainWindow):
             self.subtitle_obj,
             self._get_source_lang(),
             self._get_target_lang(),
+            style=self.style_input.text() if hasattr(self, 'style_input') else "",
+            audience=self.audience_input.text() if hasattr(self, 'audience_input') else "",
         )
         self.subtitle_worker.progress.connect(self._on_subtitle_progress)
+        self.subtitle_worker.analysis_done.connect(self._on_subtitle_analysis_done)
+        self.subtitle_worker.critique_done.connect(self._on_subtitle_critique_done)
         self.subtitle_worker.finished.connect(self._on_subtitle_finished)
         self.subtitle_worker.error.connect(self._on_subtitle_error)
         self.subtitle_worker.start()
@@ -1974,80 +2152,52 @@ class MainWindow(QMainWindow):
         self.sub_translate_btn.setEnabled(True)
         self.sub_export_btn.setEnabled(True)
 
+    def _on_subtitle_analysis_done(self, analysis):
+        """第一步完成：实时显示 AI 分析报告到分析 tab"""
+        self.last_analysis = analysis
+        self.analysis_output.setPlainText(analysis)
+        self.export_term_btn.setEnabled(True)
+        self.result_tabs.setCurrentIndex(0)
+
+    def _on_subtitle_critique_done(self, critique):
+        """第四步完成：实时显示 AI 审校报告到审校 tab"""
+        self.last_critique = critique
+        self.critique_output.setPlainText(critique)
+        self.export_critique_btn.setEnabled(True)
+
     def _on_subtitle_finished(self, subtitle, translated):
-            self.subtitle_obj = subtitle
-            self.sub_translate_btn.setEnabled(True)
-            self.sub_export_btn.setEnabled(True)
-            self.progress_label.setText("字幕翻译完成！")
-            self.progress_bar.setValue(5)
+        """第五步完成：更新字幕对象、填充结果 tab"""
+        self.subtitle_obj = subtitle
+        self.sub_translate_btn.setEnabled(True)
+        self.sub_export_btn.setEnabled(True)
+        self.progress_label.setText("字幕翻译完成！")
+        self.progress_bar.setValue(5)
 
-            # 生成翻译摘要报告 → 填入分析 tab
-            source_lang = self._get_source_lang()
-            target_lang = self._get_target_lang()
-            total = len(subtitle.entries)
-            translated_count = sum(1 for e in subtitle.entries if e.translated.strip())
-            empty_count = total - translated_count
-            total_chars_src = sum(len(e.text) for e in subtitle.entries)
-            total_chars_tgt = sum(len(e.translated) for e in subtitle.entries if e.translated.strip())
+        source_lang = self._get_source_lang()
+        target_lang = self._get_target_lang()
+        total = len(subtitle.entries)
+        translated_count = sum(1 for e in subtitle.entries if e.translated.strip())
 
-            report = f"""## 字幕翻译报告
+        # 填充结果 tab（终稿译文）
+        result_lines = []
+        for e in subtitle.entries:
+            if e.translated:
+                result_lines.append(e.translated)
+        self.result_output.setPlainText("\n".join(result_lines))
+        self.export_btn.setEnabled(True)
+        self.result_tabs.setCurrentIndex(2)
 
-    - 源语言：{source_lang}
-    - 目标语言：{target_lang}
-    - 字幕总条数：{total}
-    - 已翻译条数：{translated_count}
-    - 空条目（未翻译）：{empty_count}
-    - 原文字符数：{total_chars_src}
-    - 译文字符数：{total_chars_tgt}
-    """
-            self.analysis_output.setPlainText(report)
-            self.result_tabs.setCurrentIndex(0)
-            self.export_term_btn.setEnabled(True)
-
-            # 生成简单审校摘要 → 填入审校 tab
-            # 检查是否有明显问题
-            issues = []
-            for i, e in enumerate(subtitle.entries):
-                if not e.translated.strip():
-                    continue
-                # 检查译文是否和原文完全一样（未翻译）
-                if e.translated.strip() == e.text.strip() and source_lang != target_lang:
-                    issues.append(f"[{e.index}] 可能未翻译：{e.text[:30]}")
-                # 检查译文过长
-                ratio = len(e.translated) / max(len(e.text), 1)
-                if ratio > 2.5 and len(e.text) > 3:
-                    issues.append(f"[{e.index}] 译文偏长（{len(e.text)}→{len(e.translated)}字符）：{e.text[:30]}")
-
-            if issues:
-                critique = f"""## 审校摘要
-
-    发现 {len(issues)} 个可能的问题：
-
-    """
-                for issue in issues[:30]:
-                    critique += f"- {issue}\n"
-                if len(issues) > 30:
-                    critique += f"\n... 共 {len(issues)} 个问题，仅显示前 30 条"
-            else:
-                critique = f"""## 审校摘要
-
-    - 未发现明显问题，共翻译 {translated_count} 条字幕。
-    - 译文与原文长度比例正常。
-    """
-
-            self.critique_output.setPlainText(critique)
-
-            # 更新预览
-            preview_lines = []
-            for e in subtitle.entries[:20]:
-                preview_lines.append(f"[{e.index}] {e.start_time} --> {e.end_time}")
-                preview_lines.append(f"    {e.text}")
-                if e.translated:
-                    preview_lines.append(f"    → {e.translated}")
-                preview_lines.append("")
-            if len(subtitle.entries) > 20:
-                preview_lines.append(f"... 共 {len(subtitle.entries)} 条")
-            self.sub_preview.setPlainText("\n".join(preview_lines))
+        # 更新字幕预览
+        preview_lines = []
+        for e in subtitle.entries[:20]:
+            preview_lines.append(f"[{e.index}] {e.start_time} --> {e.end_time}")
+            preview_lines.append(f"    {e.text}")
+            if e.translated:
+                preview_lines.append(f"    → {e.translated}")
+            preview_lines.append("")
+        if len(subtitle.entries) > 20:
+            preview_lines.append(f"... 共 {len(subtitle.entries)} 条")
+        self.sub_preview.setPlainText("\n".join(preview_lines))
     # ═══════════════════════════════════════════════════════════
     # 字幕导出
     # ═══════════════════════════════════════════════════════════
