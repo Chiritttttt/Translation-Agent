@@ -1,12 +1,29 @@
 import os
 import sys
+import logging
+
+# PyInstaller 打包后，工作目录可能不是 exe 所在目录
+# 需要在加载 dotenv 之前定位 .env 文件
+if getattr(sys, 'frozen', False):
+    # onefile 模式：exe 解压目录
+    _BASE_DIR = os.path.dirname(sys.executable)
+else:
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 依次搜索：exe 同目录 → 当前目录 → 脚本目录
+for _env_dir in [_BASE_DIR, os.getcwd(), os.path.dirname(os.path.abspath(__file__))]:
+    _env_path = os.path.join(_env_dir, '.env')
+    if os.path.exists(_env_path):
+        os.environ.setdefault('DOTENV_PATH', _env_path)
+        break
+
 from dotenv import load_dotenv
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QLineEdit, QTextEdit, QPushButton, QFileDialog,
     QTabWidget, QMessageBox, QGroupBox, QProgressBar, QDialog,
     QRadioButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-    QHeaderView, QTableWidget, QTableWidgetItem, QFileDialog as _QFileDialog
+    QHeaderView, QTableWidget, QTableWidgetItem,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
@@ -14,13 +31,37 @@ import openai
 import requests
 from bs4 import BeautifulSoup
 
-load_dotenv()
+# 日志配置 — 打包后 console=False 也能写文件排查问题
+_log_dir = os.path.join(_BASE_DIR, 'logs')
+os.makedirs(_log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(_log_dir, 'translation_agent.log'), encoding='utf-8'),
+    ]
+)
+logger = logging.getLogger('TranslationAgent')
+
+_dotenv_path = os.environ.get('DOTENV_PATH', None)
+if _dotenv_path:
+    load_dotenv(_dotenv_path)
+    logger.info(f"已加载 .env: {_dotenv_path}")
+else:
+    load_dotenv()
+
+_api_key = os.getenv("OPENAI_API_KEY", "")
+_base_url = os.getenv("OPENAI_BASE_URL", "") or None
+_model_name = os.getenv("OPENAI_MODEL", "deepseek-chat")
+
+if not _api_key:
+    logger.warning("OPENAI_API_KEY 未配置，请在 .env 中设置或启动后通过界面配置")
 
 client = openai.OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),
+    api_key=_api_key or "sk-placeholder",
+    base_url=_base_url,
 )
-model = os.getenv("OPENAI_MODEL", "deepseek-chat")
+model = _model_name
 
 
 # ═══════════════════════════════════════════════════════════
@@ -558,6 +599,12 @@ def make_shadow_widget(widget, shadow_type="sm"):
 # AI 调用
 # ═══════════════════════════════════════════════════════════
 def chat(system, user, temperature=0.3):
+    if not _api_key or _api_key == "sk-placeholder":
+        raise RuntimeError(
+            "OPENAI_API_KEY 未配置。请在 .env 文件中设置 OPENAI_API_KEY，"
+            "或将 .env 文件放在程序同级目录下。"
+        )
+    logger.info(f"调用模型: {model}, temperature={temperature}")
     resp = client.chat.completions.create(
         model=model, temperature=temperature,
         messages=[{"role": "system", "content": system},
@@ -586,19 +633,50 @@ def fetch_url(url):
     raise RuntimeError("无法抓取URL，请手动复制正文。")
 
 
-def split_chunks(text, max_words=3000):
-    words = text.split()
-    if len(words) <= max_words:
-        return [text]
-    chunks, current = [], []
-    for word in words:
-        current.append(word)
-        if len(current) >= max_words:
+def split_chunks(text, max_chars=8000):
+    """智能分块，兼容中文（按字符数）和英文（按空格分词）。"""
+    # 判断是否以 CJK 字符为主（超过 30%）
+    cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
+    is_cjk = cjk_count > len(text) * 0.3
+
+    if is_cjk:
+        # 中文：按字符数分割，优先在句号/段落边界断开
+        if len(text) <= max_chars:
+            return [text]
+        break_chars = '。！？\n；'
+        chunks, current = [], []
+        for ch in text:
+            current.append(ch)
+            if len(current) >= max_chars:
+                # 向回找到最近的断句位置
+                best = -1
+                for j in range(len(current) - 1, max(0, len(current) - 200), -1):
+                    if current[j] in break_chars:
+                        best = j + 1
+                        break
+                if best > 0:
+                    chunks.append("".join(current[:best]))
+                    current = current[best:]
+                else:
+                    chunks.append("".join(current))
+                    current = []
+        if current:
+            chunks.append("".join(current))
+        return chunks if chunks else [text]
+    else:
+        # 英文/西文：按空格分词
+        words = text.split()
+        if len(words) <= 3000:
+            return [text]
+        chunks, current = [], []
+        for word in words:
+            current.append(word)
+            if len(current) >= 3000:
+                chunks.append(" ".join(current))
+                current = []
+        if current:
             chunks.append(" ".join(current))
-            current = []
-    if current:
-        chunks.append(" ".join(current))
-    return chunks
+        return chunks
 
 
 # ═══════════════════════════════════════════════════════════
@@ -682,9 +760,25 @@ Keep paragraph count similar, preserve format fully. Only output pure translatio
 
 
 def step4_critique(source_text, draft, analysis, source_lang, target_lang):
-    return chat(
-        "你是严格的翻译审校专家。",
-        f"""审校{source_lang}→{target_lang}译文，输出诊断报告：
+    """审校译文 — 长文档分段审校，避免截断。"""
+    # 对长文档进行分段审校
+    max_len = 6000
+    src_chunks = [source_text[i:i+max_len] for i in range(0, len(source_text), max_len)]
+    draft_chunks = [draft[i:i+max_len] for i in range(0, len(draft), max_len)]
+    # 合并对应段进行审校
+    pairs = []
+    for i in range(max(len(src_chunks), len(draft_chunks))):
+        s = src_chunks[i] if i < len(src_chunks) else ""
+        d = draft_chunks[i] if i < len(draft_chunks) else ""
+        if s or d:
+            pairs.append((s, d))
+
+    critiques = []
+    for idx, (src_part, draft_part) in enumerate(pairs):
+        part_label = f"（第 {idx+1}/{len(pairs)} 段）" if len(pairs) > 1 else ""
+        critique = chat(
+            "你是严格的翻译审校专家。",
+            f"""审校{source_lang}→{target_lang}译文{part_label}，输出诊断报告：
 ## 准确性与完整性
 ## 翻译腔问题（原句 → 建议）
 ## 修辞与情感保真
@@ -692,21 +786,48 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang):
 ## 总结
 只列出问题，不要自行改写译文原文。
 
-原文（前3000字）：\n{source_text[:3000]}
-译文：\n{draft[:4000]}
-分析：\n{analysis[:1000]}"""
-    )
+原文：\n{src_part}
+译文：\n{draft_part}
+分析要点：\n{analysis[:2000]}"""
+        )
+        critiques.append(critique)
+
+    return "\n\n---\n\n".join(critiques)
 
 
 def step5_final(draft, critique, target_lang):
-    return chat(
-        f"你是{target_lang}母语精修专家，严格依据审校报告逐条修正",
-        f"""原文分析、初译草稿、审校问题全部参考上方。
+    """终稿润色 — 长文档分段修正，避免超出上下文窗口。"""
+    max_len = 6000
+    draft_chunks = [draft[i:i+max_len] for i in range(0, len(draft), max_len)]
+
+    if len(draft_chunks) <= 1:
+        return chat(
+            f"你是{target_lang}母语精修专家，严格依据审校报告逐条修正",
+            f"""原文分析、初译草稿、审校问题全部参考上方。
 逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
 只输出最终纯净定稿译文：
 初译：{draft}
 审校：{critique}"""
-    )
+        )
+
+    # 长文档：逐段修正
+    # 将 critique 也分段，确保对应关系
+    critique_chunks = [critique[i:i+max_len] for i in range(0, len(critique), max_len)]
+    final_parts = []
+    for idx, draft_part in enumerate(draft_chunks):
+        # 取对应的 critique 段（可能不一一对应，取最后一段作为兜底）
+        crit_part = critique_chunks[idx] if idx < len(critique_chunks) else critique_chunks[-1] if critique_chunks else ""
+        result = chat(
+            f"你是{target_lang}母语精修专家，严格依据审校报告逐条修正",
+            f"""以下是第 {idx+1}/{len(draft_chunks)} 段的修正任务。
+逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
+只输出这一段的最终纯净定稿译文：
+初译段落：{draft_part}
+审校参考：{crit_part}"""
+        )
+        final_parts.append(result)
+
+    return "\n\n".join(final_parts)
 
 
 # ═══════════════════════════════════════════════════════════

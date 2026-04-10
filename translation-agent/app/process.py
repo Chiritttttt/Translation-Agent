@@ -19,7 +19,8 @@ from patch import (
 from simplemma import simple_tokenizer
 
 
-progress = gr.Progress()
+# progress 延迟初始化，仅在 Gradio 环境中生效
+progress = None
 
 
 def extract_text(path):
@@ -102,17 +103,20 @@ def translator(
     if num_tokens_in_text < max_tokens:
         ic("Translating text as single chunk")
 
-        progress((1, 3), desc="First translation...")
+        if progress:
+            progress((1, 3), desc="First translation...")
         init_translation = one_chunk_initial_translation(
             source_lang, target_lang, source_text
         )
 
-        progress((2, 3), desc="Reflection...")
+        if progress:
+            progress((2, 3), desc="Reflection...")
         reflection = one_chunk_reflect_on_translation(
             source_lang, target_lang, source_text, init_translation, country
         )
 
-        progress((3, 3), desc="Second translation...")
+        if progress:
+            progress((3, 3), desc="Second translation...")
         final_translation = one_chunk_improve_translation(
             source_lang, target_lang, source_text, init_translation, reflection
         )
@@ -136,14 +140,16 @@ def translator(
 
         source_text_chunks = text_splitter.split_text(source_text)
 
-        progress((1, 3), desc="First translation...")
+        if progress:
+            progress((1, 3), desc="First translation...")
         translation_1_chunks = multichunk_initial_translation(
             source_lang, target_lang, source_text_chunks
         )
 
         init_translation = "".join(translation_1_chunks)
 
-        progress((2, 3), desc="Reflection...")
+        if progress:
+            progress((2, 3), desc="Reflection...")
         reflection_chunks = multichunk_reflect_on_translation(
             source_lang,
             target_lang,
@@ -154,7 +160,8 @@ def translator(
 
         reflection = "".join(reflection_chunks)
 
-        progress((3, 3), desc="Second translation...")
+        if progress:
+            progress((3, 3), desc="Second translation...")
         translation_2_chunks = multichunk_improve_translation(
             source_lang,
             target_lang,
@@ -187,7 +194,8 @@ def translator_sec(
     if num_tokens_in_text < max_tokens:
         ic("Translating text as single chunk")
 
-        progress((1, 3), desc="First translation...")
+        if progress:
+            progress((1, 3), desc="First translation...")
         init_translation = one_chunk_initial_translation(
             source_lang, target_lang, source_text
         )
@@ -197,12 +205,14 @@ def translator_sec(
         except Exception as e:
             raise gr.Error(f"An unexpected error occurred: {e}") from e
 
-        progress((2, 3), desc="Reflection...")
+        if progress:
+            progress((2, 3), desc="Reflection...")
         reflection = one_chunk_reflect_on_translation(
             source_lang, target_lang, source_text, init_translation, country
         )
 
-        progress((3, 3), desc="Second translation...")
+        if progress:
+            progress((3, 3), desc="Second translation...")
         final_translation = one_chunk_improve_translation(
             source_lang, target_lang, source_text, init_translation, reflection
         )
@@ -226,7 +236,8 @@ def translator_sec(
 
         source_text_chunks = text_splitter.split_text(source_text)
 
-        progress((1, 3), desc="First translation...")
+        if progress:
+            progress((1, 3), desc="First translation...")
         translation_1_chunks = multichunk_initial_translation(
             source_lang, target_lang, source_text_chunks
         )
@@ -238,7 +249,8 @@ def translator_sec(
         except Exception as e:
             raise gr.Error(f"An unexpected error occurred: {e}") from e
 
-        progress((2, 3), desc="Reflection...")
+        if progress:
+            progress((2, 3), desc="Reflection...")
         reflection_chunks = multichunk_reflect_on_translation(
             source_lang,
             target_lang,
@@ -249,7 +261,8 @@ def translator_sec(
 
         reflection = "".join(reflection_chunks)
 
-        progress((3, 3), desc="Second translation...")
+        if progress:
+            progress((3, 3), desc="Second translation...")
         translation_2_chunks = multichunk_improve_translation(
             source_lang,
             target_lang,

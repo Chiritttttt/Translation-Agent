@@ -9,8 +9,6 @@
 import re
 import os
 from datetime import timedelta
-import re
-import html as html_module
 
 
 def clean_subtitle_entry(text: str) -> str:
