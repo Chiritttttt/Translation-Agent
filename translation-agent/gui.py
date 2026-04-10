@@ -73,6 +73,11 @@ def step1_analyze(text, source_lang, target_lang, audience, style):
 输出严格按照以下固定Markdown结构：
 ## 概要
 ## 术语表（原文 → 译法）
+请逐行列出所有专业术语、缩写、惯用表达、专有名词。
+格式要求：每行一条，用 → 连接，例如：
+- machine learning → 机器学习
+- large language model → 大语言模型
+- the state of the art → 最先进的
 ## 语气与风格判定
 ## 读者理解难点 & 文化注解点
 ## 修辞隐喻与替换映射
@@ -90,12 +95,17 @@ def step1_analyze(text, source_lang, target_lang, audience, style):
 
 
 def step2_build_prompt(analysis, source_lang, target_lang, audience, style):
+    from glossary import get_glossary_prompt_block
+
     if style == "auto" or not style.strip():
         style_block = f"""The source text's tone is extracted from analysis above.
 Reproduce this tone faithfully in {target_lang}. Match register, rhythm, personality exactly."""
     else:
         style_block = f"""{style}
 Apply this style consistently across full text."""
+
+    # 从本地术语库注入约束
+    glossary_block = get_glossary_prompt_block(source_lang, target_lang)
 
     prompt_full = f"""You are a professional translator. Translate from {source_lang} to {target_lang}.
 Think and reason entirely in {target_lang}.
@@ -105,6 +115,8 @@ Think and reason entirely in {target_lang}.
 
 ## Translation Style
 {style_block}
+
+{glossary_block}
 
 ## Content Background
 {analysis}
@@ -185,6 +197,13 @@ class TranslateWorker(QThread):
             analysis = step1_analyze(self.source_text, self.source_lang,
                                      self.target_lang, self.audience, self.style)
             self.analysis_done.emit(analysis)
+
+            # 自动从分析报告中提取术语并加入本地术语库
+            from glossary import extract_terms_from_analysis, add_terms_batch
+            new_terms = extract_terms_from_analysis(analysis, self.source_lang, self.target_lang)
+            if new_terms:
+                added, _ = add_terms_batch(new_terms, self.source_lang, self.target_lang)
+                self.progress.emit(f"📚 术语入库：新增 {added} 条", 1)
 
             self.progress.emit("📝 第二步：组装提示...", 2)
             prompt = step2_build_prompt(analysis, self.source_lang,
@@ -393,18 +412,21 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.do_export)
 
-        self.export_term_btn = QPushButton("📚 导出术语表")
-        self.export_term_btn.setEnabled(False)
-        self.export_term_btn.clicked.connect(self.export_terms)
+        self.export_term_btn = QPushButton("📚 导出术语")
+        self.export_term_btn.clicked.connect(self.export_glossary)
 
         self.export_critique_btn = QPushButton("🔍 导出审校报告")
         self.export_critique_btn.setEnabled(False)
         self.export_critique_btn.clicked.connect(self.export_critique)
 
+        self.glossary_btn = QPushButton("📖 术语库")
+        self.glossary_btn.clicked.connect(self.open_glossary_manager)
+
         btn_row.addWidget(self.translate_btn, stretch=3)
         btn_row.addWidget(self.export_btn, stretch=1)
         btn_row.addWidget(self.export_term_btn, stretch=1)
         btn_row.addWidget(self.export_critique_btn, stretch=1)
+        btn_row.addWidget(self.glossary_btn, stretch=1)
         layout.addLayout(btn_row)
 
         self.progress_bar = QProgressBar()
@@ -436,6 +458,21 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.result_tabs)
         layout.addWidget(rg, stretch=1)
 
+    def _ocr_progress_handler(self, current, total, message):
+        """OCR 进度回调，在主线程安全地更新 UI"""
+        from PyQt6.QtCore import QMetaObject, Q_ARG
+        QMetaObject.invokeMethod(
+            self.progress_label, "setText",
+            Q_ARG(str, message)
+        )
+        if total > 0:
+            QMetaObject.invokeMethod(
+                self.progress_bar, "setValue",
+                Q_ARG(int, int(current * 5 / max(total, 1)))
+            )
+        # 强制刷新 UI
+        QApplication.processEvents()
+
     def choose_file(self):
         try:
             path, _ = QFileDialog.getOpenFileName(
@@ -444,8 +481,23 @@ class MainWindow(QMainWindow):
             if not path:
                 return
 
-            from file_handler import read_file
+            from file_handler import read_file, set_ocr_progress_callback
+
+            # 注册 OCR 进度回调（仅 PDF 需要）
+            ext = path.lower().split(".")[-1]
+            if ext == "pdf":
+                set_ocr_progress_callback(self._ocr_progress_handler)
+                self.progress_label.setText("正在读取 PDF...")
+                self.progress_bar.setRange(0, 5)
+                self.progress_bar.setValue(0)
+                QApplication.processEvents()
+
             file_type, content, extra = read_file(path)
+
+            # 清除回调
+            set_ocr_progress_callback(None)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("")
 
             self.text_input.setPlainText(content)
 
@@ -533,26 +585,66 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("")
         self.translate_btn.setEnabled(True)
 
-    def export_terms(self):
-        if not self.last_analysis:
-            QMessageBox.warning(self, "提示", "暂无术语表可导出")
+    def export_glossary(self):
+        """导出术语库（只包含词汇和表达，不含分析报告全文）"""
+        from glossary import export_glossary_text, get_terms
+        source_lang = self.source_lang.currentText()
+        target_lang = self.target_lang.currentText()
+        terms = get_terms(source_lang, target_lang)
+        if not terms:
+            QMessageBox.information(self, "提示",
+                f"当前语言对（{source_lang} → {target_lang}）的术语库为空。\n\n"
+                "翻译后会自动从分析报告中提取术语入库。")
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出术语表", "术语表.txt",
-            "文本文件 (*.txt);;Word文档 (*.docx)")
+            self, "导出术语库", f"术语表_{source_lang}_{target_lang}.txt",
+            "文本文件 (*.txt);;JSON 文件 (*.json);;Word文档 (*.docx)")
         if not path:
             return
         try:
-            if path.endswith(".docx"):
+            if path.endswith(".json"):
+                from glossary import export_glossary_json
+                content = export_glossary_json(source_lang, target_lang)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            elif path.endswith(".docx"):
                 from docx import Document
+                from docx.shared import RGBColor
                 doc = Document()
-                doc.add_heading("术语表", level=1)
-                doc.add_paragraph(self.last_analysis)
+                doc.add_heading(f"术语表 ({source_lang} → {target_lang})", level=1)
+
+                # 按分类分组
+                categories = {}
+                for t in terms:
+                    cat = t.get("category", "术语")
+                    if cat not in categories:
+                        categories[cat] = []
+                    categories[cat].append(t)
+
+                for cat, cat_terms in categories.items():
+                    doc.add_heading(f"【{cat}】", level=2)
+                    table = doc.add_table(rows=1, cols=3)
+                    table.style = "Table Grid"
+                    hdr = table.rows[0].cells
+                    for idx, txt in enumerate(["原文", "译文", "分类"]):
+                        run = hdr[idx].paragraphs[0].add_run(txt)
+                        run.bold = True
+                        run.font.color.rgb = RGBColor(0x4F, 0x8E, 0xF7)
+                    for t in cat_terms:
+                        row = table.add_row().cells
+                        row[0].paragraphs[0].add_run(t["source"])
+                        row[1].paragraphs[0].add_run(t["target"])
+                        row[2].paragraphs[0].add_run(t.get("category", ""))
+                    doc.add_paragraph("")
+
                 doc.save(path)
             else:
+                content = export_glossary_text(source_lang, target_lang)
                 with open(path, "w", encoding="utf-8") as f:
-                    f.write(self.last_analysis)
-            QMessageBox.information(self, "✅ 导出成功", f"术语表已保存：\n{path}")
+                    f.write(content)
+
+            QMessageBox.information(self, "✅ 导出成功",
+                f"术语库已保存（{len(terms)} 条）：\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "失败", str(e))
 
@@ -672,6 +764,195 @@ class MainWindow(QMainWindow):
         if text:
             QApplication.clipboard().setText(text)
             QMessageBox.information(self, "✅", "已复制译文")
+
+    def open_glossary_manager(self):
+        """打开术语库管理窗口"""
+        from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        from glossary import (
+            get_terms, get_all_lang_pairs, delete_term, delete_lang_pair,
+            clear_all, import_glossary_from_text, load_glossary,
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("📖 术语库管理")
+        dialog.setMinimumSize(700, 520)
+        dialog.setStyleSheet("""
+            QDialog { background-color: #fff; color: #000; }
+            QLabel { font-size:13px; color:#000; }
+            QPushButton { padding:7px 14px; font-size:13px; border-radius:6px; color:#000;
+                          background:#fff; border:1px solid #EAEAEA; }
+            QPushButton:hover { background:#f5f5f5; }
+            QTableWidget { font-size:13px; gridline-color: #EAEAEA; }
+            QHeaderView::section { background:#F5F5F5; padding:6px; border:1px solid #EAEAEA;
+                                   font-weight:bold; font-size:13px; }
+            QComboBox { background:#fff; border:1px solid #EAEAEA; border-radius:6px;
+                        padding:6px 10px; font-size:13px; color:#222; }
+            QTextEdit { background:#fff; border:1px solid #EAEAEA; border-radius:6px;
+                        padding:6px; font-size:13px; color:#222; }
+        """)
+
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+
+        # 标题 + 统计
+        data = load_glossary()
+        stats = data.get("stats", {})
+        header_layout = QHBoxLayout()
+        title_lbl = QLabel("📖 术语库")
+        title_lbl.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+        header_layout.addWidget(title_lbl)
+        stats_lbl = QLabel(f"共 {stats.get('total_terms', 0)} 条术语 · "
+                          f"{stats.get('total_pairs', 0)} 个语言对")
+        stats_lbl.setStyleSheet("color: gray; font-size:12px;")
+        header_layout.addWidget(stats_lbl)
+        header_layout.addStretch()
+        main_layout.addLayout(header_layout)
+
+        # 语言对选择
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel("语言对："))
+        pairs = get_all_lang_pairs()
+        pair_combo = QComboBox()
+        pair_combo.setMinimumWidth(200)
+        if pairs:
+            for p in pairs:
+                pair_combo.addItem(f"{p['key']}  ({p['count']}条)", p['key'])
+        else:
+            pair_combo.addItem("暂无数据", "")
+        lang_row.addWidget(pair_combo)
+        lang_row.addStretch()
+
+        # 导入按钮
+        import_btn = QPushButton("📥 导入术语")
+        lang_row.addWidget(import_btn)
+        main_layout.addLayout(lang_row)
+
+        # 术语表格
+        table = QTableWidget()
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["原文", "译文", "分类", "添加时间"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.SelectionTrigger.NoEditTriggers)
+        main_layout.addWidget(table)
+
+        # 操作按钮行
+        btn_row = QHBoxLayout()
+
+        def refresh_table():
+            pair_key = pair_combo.currentData() or ""
+            if not pair_key:
+                table.setRowCount(0)
+                return
+            # 解析 key 如 "en→zh"
+            parts = pair_key.split("→")
+            sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
+            terms = get_terms(sl, tl)
+            table.setRowCount(len(terms))
+            for row_idx, t in enumerate(terms):
+                table.setItem(row_idx, 0, QTableWidgetItem(t.get("source", "")))
+                table.setItem(row_idx, 1, QTableWidgetItem(t.get("target", "")))
+                table.setItem(row_idx, 2, QTableWidgetItem(t.get("category", "")))
+                table.setItem(row_idx, 3, QTableWidgetItem(t.get("added_at", "")))
+            # 更新统计
+            data = load_glossary()
+            s = data.get("stats", {})
+            stats_lbl.setText(f"共 {s.get('total_terms', 0)} 条术语 · "
+                             f"{s.get('total_pairs', 0)} 个语言对")
+
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.clicked.connect(refresh_table)
+        btn_row.addWidget(refresh_btn)
+
+        delete_selected_btn = QPushButton("🗑️ 删除选中")
+        def delete_selected():
+            pair_key = pair_combo.currentData() or ""
+            if not pair_key:
+                return
+            parts = pair_key.split("→")
+            sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
+            rows = set(item.row() for item in table.selectedItems())
+            for row in sorted(rows, reverse=True):
+                src = table.item(row, 0).text() if table.item(row, 0) else ""
+                delete_term(sl, tl, src)
+            refresh_table()
+
+        delete_selected_btn.clicked.connect(delete_selected)
+        btn_row.addWidget(delete_selected_btn)
+
+        clear_btn = QPushButton("⚠️ 清空当前语言对")
+        def clear_pair():
+            pair_key = pair_combo.currentData() or ""
+            if not pair_key:
+                return
+            ret = QMessageBox.question(dialog, "确认",
+                f"确定清空 {pair_key} 的所有术语？此操作不可撤销。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                parts = pair_key.split("→")
+                delete_lang_pair(parts[0], parts[1])
+                refresh_table()
+
+        clear_btn.clicked.connect(clear_pair)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch()
+        main_layout.addLayout(btn_row)
+
+        # 导入术语对话框
+        def do_import():
+            imp_dialog = QDialog(dialog)
+            imp_dialog.setWindowTitle("📥 导入术语")
+            imp_dialog.setMinimumSize(500, 350)
+            imp_dialog.setStyleSheet("""
+                QDialog { background-color: #fff; color: #000; }
+                QLabel { font-size:13px; color:#000; }
+                QTextEdit { background:#fff; border:1px solid #EAEAEA; border-radius:6px;
+                            padding:8px; font-size:13px; color:#222; }
+                QPushButton { padding:8px 16px; font-size:13px; border-radius:6px; color:#000;
+                              background:#fff; border:1px solid #EAEAEA; }
+            """)
+            imp_layout = QVBoxLayout(imp_dialog)
+            imp_layout.setSpacing(8)
+            imp_layout.setContentsMargins(16, 16, 16, 16)
+
+            imp_layout.addWidget(QLabel("粘贴术语，每行一条，格式：原文 → 译文"))
+            imp_text = QTextEdit()
+            imp_text.setPlaceholderText("machine learning → 机器学习\nneural network → 神经网络\nthe state of the art → 最先进的\n...")
+            imp_layout.addWidget(imp_text)
+
+            imp_result = QLabel("")
+            imp_layout.addWidget(imp_result)
+
+            imp_btn_row = QHBoxLayout()
+            def do_import_text():
+                pair_key = pair_combo.currentData() or ""
+                if not pair_key:
+                    return
+                parts = pair_key.split("→")
+                sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
+                added, total = import_glossary_from_text(
+                    imp_text.toPlainText(), sl, tl)
+                imp_result.setText(f"✅ 导入完成：新增 {added} 条 / 共解析 {total} 条")
+                refresh_table()
+
+            imp_btn = QPushButton("确认导入")
+            imp_btn.clicked.connect(do_import_text)
+            imp_btn_row.addWidget(imp_btn)
+            imp_btn_row.addStretch()
+            imp_layout.addLayout(imp_btn_row)
+
+            imp_dialog.exec()
+
+        import_btn.clicked.connect(do_import)
+
+        # 首次加载
+        refresh_table()
+
+        dialog.exec()
 
 
 if __name__ == "__main__":

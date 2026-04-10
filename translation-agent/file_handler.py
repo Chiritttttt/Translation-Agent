@@ -1,18 +1,163 @@
 import os
+import base64
+import sys
+
+# ─── OCR 进度回调 ────────────────────────────────────
+_ocr_progress_callback = None
+
+
+def set_ocr_progress_callback(callback):
+    """设置 OCR 进度回调函数，供 GUI 调用。
+    callback(current_page, total_pages, message)
+    """
+    global _ocr_progress_callback
+    _ocr_progress_callback = callback
+
+
+def _report_ocr_progress(current, total, msg):
+    if _ocr_progress_callback:
+        try:
+            _ocr_progress_callback(current, total, msg)
+        except Exception:
+            pass
 
 
 # ─── 读取 ────────────────────────────────────────────────
 
 def read_pdf(file_path):
+    """读取 PDF 文件，自动判断是否为扫描件并启用 AI OCR。
+
+    流程：
+    1. 用 PyMuPDF 提取文本
+    2. 质量检测：平均每页 < 20 字符 → 判定为扫描件
+    3. 扫描件 → pdf2image 转图片 → OpenAI 兼容 Vision API 做 OCR
+    """
     try:
         import fitz
         doc = fitz.open(file_path)
-        text = ""
+        page_count = len(doc)
+
+        # 第一步：尝试文本提取
+        text_parts = []
         for page in doc:
-            text += page.get_text() + "\n\n"
-        return text.strip()
+            page_text = page.get_text().strip()
+            text_parts.append(page_text)
+        full_text = "\n\n".join(text_parts).strip()
+
+        # 第二步：质量检测
+        avg_chars = len(full_text) / max(page_count, 1)
+        if avg_chars >= 20:
+            return full_text
+
+        # 第三步：文本太少，很可能是扫描件，启用 OCR
+        _report_ocr_progress(0, page_count, "检测到扫描件，启用 AI 视觉 OCR...")
+        ocr_text = _ocr_with_vision(file_path, page_count)
+        if ocr_text and len(ocr_text.strip()) > 10:
+            return ocr_text.strip()
+
+        # OCR 也失败，返回原始文本（可能为空）
+        return full_text
+
     except Exception as e:
         raise Exception(f"PDF读取失败: {e}")
+
+
+def _ocr_with_vision(file_path, page_count):
+    """使用 OpenAI 兼容的 Vision API 对 PDF 逐页做 OCR。
+    读取 .env 中的 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL 配置。
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+
+        import openai
+        from pdf2image import convert_from_path
+        from io import BytesIO
+
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        base_url = os.getenv("OPENAI_BASE_URL", "")
+        model = os.getenv("OPENAI_MODEL", "")
+
+        if not api_key:
+            print("[OCR] 未配置 OPENAI_API_KEY，无法进行 OCR 识别")
+            return ""
+
+        # 选择模型：优先使用用户配置的模型，带 vision 能力的模型
+        vision_model = model if model else "gpt-4o"
+
+        client = openai.OpenAI(api_key=api_key, base_url=base_url if base_url else None)
+
+        # 将 PDF 每页转为图片
+        _report_ocr_progress(0, page_count, "正在转换 PDF 页面为图片...")
+        images = convert_from_path(file_path, dpi=200)
+
+        if not images:
+            return ""
+
+        actual_pages = len(images)
+        all_text = []
+
+        for i, img in enumerate(images):
+            _report_ocr_progress(i + 1, actual_pages,
+                                 f"OCR 识别中: 第 {i+1}/{actual_pages} 页...")
+            try:
+                # 将 PIL Image 转 base64
+                buf = BytesIO()
+                # 统一转为 RGB 避免 RGBA 问题
+                if img.mode == "RGBA":
+                    img = img.convert("RGB")
+                img.save(buf, format="PNG")
+                img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+                # 调用 Vision API
+                response = client.chat.completions.create(
+                    model=vision_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是一个专业的 OCR 助手。请从文档图片中完整、准确地提取所有文字。"
+                                "保留段落、标题、列表等结构。只输出提取的文字，不要有任何解释。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"请提取第 {i+1} 页的所有文字，保留原始格式和结构。",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{img_b64}"
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                    temperature=0.1,
+                    max_tokens=4096,
+                )
+
+                page_text = response.choices[0].message.content or ""
+                if page_text.strip():
+                    all_text.append(page_text.strip())
+
+            except Exception as e:
+                print(f"[OCR] 第 {i+1} 页识别失败: {e}")
+                continue
+
+        _report_ocr_progress(actual_pages, actual_pages, "OCR 识别完成！")
+        return "\n\n".join(all_text)
+
+    except ImportError as e:
+        print(f"[OCR] 缺少依赖: {e}")
+        print("[OCR] 请安装: pip install pdf2image Pillow openai python-dotenv")
+        return ""
+    except Exception as e:
+        print(f"[OCR] Vision API 调用失败: {e}")
+        return ""
 
 
 def read_docx(file_path):
@@ -55,6 +200,13 @@ def read_excel(file_path):
 
 
 def read_file(file_path):
+    """读取文件，自动识别格式。
+
+    返回: (file_type, content, extra)
+      - file_type: 'pdf' | 'docx' | 'pptx' | 'xlsx' | 'txt'
+      - content: 提取的文本
+      - extra: Excel 时为行数据列表 [[cell, ...], ...]，其他格式为 None
+    """
     ext = file_path.lower().split(".")[-1]
     if ext == "pdf":
         return "pdf", read_pdf(file_path), None
@@ -386,11 +538,24 @@ def register_fonts():
     try:
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        for path in [
+        # 按优先级搜索 CJK 字体路径
+        font_paths = [
+            # Windows
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simsun.ttc",
             "C:/Windows/Fonts/simhei.ttf",
-        ]:
+            # Linux
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            # macOS
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+        ]
+        for path in font_paths:
             if os.path.exists(path):
                 pdfmetrics.registerFont(TTFont("CJK", path))
                 return "CJK"
