@@ -276,51 +276,88 @@ def clean_subtitle_file(subtitle) -> object:
             merged.append(curr)
         subtitle.entries = merged
 
-    # ── 5.6. 去除相邻条目间的文本重叠（渐进式字幕残余） ──
-    # YouTube 渐进式字幕合并后，相邻条目仍有共享行：
-    #   条目1: "Thank you.\nTonight, I want to start with a simple"
-    #   条目2: "Tonight, I want to start with a simple\nquestion."
-    # 需要去除条目开头与前一条结尾重复的行，只保留新增部分
-    def _fuzzy_eq(a, b):
-        """模糊行比较：去除标点和大小写差异后比较"""
-        def normalize(s):
+    # ── 5.6. 合并多行文本 + 字符级重叠合并 ──
+    # YouTube 渐进式字幕合并后，相邻条目仍有共享行/文本重叠。
+    # 先将多行文本合并为单行（用空格连接），再用字符级后缀/前缀匹配
+    # 和子串包含检测，迭代合并相邻条目，生成完整句子。
+
+    # 5.6a. 多行 → 单行
+    for entry in subtitle.entries:
+        if '\n' in entry.text:
+            entry.text = re.sub(r'\s*\n\s*', ' ', entry.text).strip()
+
+    # 5.6b. 迭代合并文本重叠的相邻条目
+    _MAX_MERGE_DURATION_MS = 10000  # 单条字幕最长 10 秒
+
+    def _fuzzy_text_contains(short, long):
+        """判断 short（去标点后）是否是 long（去标点后）的子串"""
+        def _norm(s):
             return re.sub(r'[\s\.\,\;\:\!\?\'\"\-\(\)\[\]\{\}]+', '', s).lower()
-        return normalize(a) == normalize(b)
+        ns, nl = _norm(short), _norm(long)
+        return ns and nl and ns in nl
 
-    if len(subtitle.entries) > 1:
-        for i in range(1, len(subtitle.entries)):
-            prev = subtitle.entries[i - 1]
-            curr = subtitle.entries[i]
-            prev_lines = prev.text.strip().split('\n')
-            curr_lines = curr.text.strip().split('\n')
+    changed = True
+    while changed:
+        changed = False
+        new_entries = []
+        i = 0
+        while i < len(subtitle.entries):
+            if i >= len(subtitle.entries) - 1:
+                new_entries.append(subtitle.entries[i])
+                break
 
-            if not prev_lines or not curr_lines:
+            prev = subtitle.entries[i]
+            curr = subtitle.entries[i + 1]
+            prev_t = prev.text.strip()
+            curr_t = curr.text.strip()
+
+            if not prev_t or not curr_t:
+                new_entries.append(prev)
+                i += 1
                 continue
 
-            # 从前往后找：当前条目开头有多少行与前一条尾部重复
-            overlap = 0
-            for j in range(1, min(len(prev_lines), len(curr_lines)) + 1):
-                curr_prefix = curr_lines[:j]
-                prev_suffix = prev_lines[-j:]
-                matched = True
-                for k in range(j):
-                    if not _fuzzy_eq(curr_prefix[k], prev_suffix[k]):
-                        matched = False
-                        break
-                if matched:
-                    overlap = j
-                else:
+            merged = False
+
+            # 检测 1：后缀/前缀重叠（字符级）
+            max_check = min(len(prev_t), len(curr_t), 200)
+            for k in range(max_check, 0, -1):
+                if prev_t[-k:].lower() == curr_t[:k].lower():
+                    if k > 5:
+                        new_end_ms = _end_to_ms(curr)
+                        new_dur = new_end_ms - _time_to_ms(prev)
+                        if new_dur <= _MAX_MERGE_DURATION_MS:
+                            prev.text = prev_t + curr_t[k:]
+                            prev.end_time = curr.end_time
+                            merged = True
+                            changed = True
                     break
 
-            if overlap > 0:
-                # 当前条目只保留非重复的新增行
-                curr.text = '\n'.join(curr_lines[overlap:]).strip()
-                if not curr.text:
-                    curr.text = ""
+            # 检测 2：子串包含（模糊，去标点后比较）
+            if not merged and _fuzzy_text_contains(prev_t, curr_t):
+                new_end_ms = _end_to_ms(curr)
+                new_dur = new_end_ms - _time_to_ms(prev)
+                if new_dur <= _MAX_MERGE_DURATION_MS:
+                    if len(curr_t) >= len(prev_t):
+                        prev.text = curr_t
+                    prev.end_time = curr.end_time
+                    merged = True
+                    changed = True
+            elif not merged and _fuzzy_text_contains(curr_t, prev_t):
+                new_end_ms = _end_to_ms(curr)
+                new_dur = new_end_ms - _time_to_ms(prev)
+                if new_dur <= _MAX_MERGE_DURATION_MS:
+                    prev.end_time = curr.end_time
+                    merged = True
+                    changed = True
 
-        # 去重后清理产生的空文本条目（将被后续步骤 6 的重叠修复合并）
-        # 但步骤 2 已执行过，需要再清一轮
-        subtitle.entries = [e for e in subtitle.entries if e.text.strip()]
+            if merged:
+                new_entries.append(prev)
+                i += 2
+            else:
+                new_entries.append(prev)
+                i += 1
+
+        subtitle.entries = new_entries
 
     # ── 6. 修复时间重叠（裁剪，确保每条 start >= 上一条 end） ──
     if len(subtitle.entries) > 1:
