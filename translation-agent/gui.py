@@ -1682,6 +1682,13 @@ class MainWindow(QMainWindow):
                 preview_lines.append(f"\n... 还有 {sub.entry_count - 20} 条")
 
             self.sub_preview.setPlainText("\n".join(preview_lines))
+            self.subtitle_obj = parsed_subtitle
+
+            # ── 自动清洗字幕 ──
+            from subtitle_handler import clean_subtitle_file
+            self.subtitle_obj = clean_subtitle_file(self.subtitle_obj)
+
+            self.sub_file_label.setText(f"已导入（已清洗）：{os.path.basename(path)}")
             self.sub_file_label.setText(f"已加载: {os.path.basename(path)} ({sub.entry_count} 条)")
             self.sub_translate_btn.setEnabled(True)
             self.sub_export_btn.setEnabled(False)

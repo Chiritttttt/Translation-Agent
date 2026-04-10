@@ -9,6 +9,131 @@
 import re
 import os
 from datetime import timedelta
+import re
+import html as html_module
+
+
+def clean_subtitle_entry(text: str) -> str:
+    """清洗单条字幕文本"""
+    # 去除 HTML 标签
+    text = re.sub(r'<[^>]+>', '', text)
+    # 去除 ASS/SSA 样式标签 {\xxx}
+    text = re.sub(r'\{\\[^}]*\}', '', text)
+    # 去除残留空大括号
+    text = re.sub(r'\{\}', '', text)
+    # 去除音乐符号 ♪
+    text = text.replace('♪', '').replace('♫', '')
+    # 去除全角空格
+    text = text.replace('\u3000', ' ')
+    # 合并多个空格为一个
+    text = re.sub(r' {2,}', ' ', text)
+    # 去除首尾空白
+    text = text.strip()
+    return text
+
+
+def clean_subtitle_file(subtitle) -> object:
+    """
+    清洗字幕文件：
+    1. 去除头部信息、注释、HTML标签、样式声明
+    2. 合并相邻重复行
+    3. 时间统一转为 SRT 格式 (00:00:00,000)
+    4. 重编号
+
+    参数: subtitle - SubtitleFile 对象
+    返回: 清洗后的 SubtitleFile 对象（原地修改并返回）
+    """
+    if not subtitle or not subtitle.entries:
+        return subtitle
+
+    # ── 1. 清洗每条字幕文本 ──
+    for entry in subtitle.entries:
+        entry.text = clean_subtitle_entry(entry.text)
+
+    # ── 2. 合并相邻重复行 ──
+    merged = []
+    prev_text = None
+    for entry in subtitle.entries:
+        if entry.text == prev_text and entry.text.strip() == '':
+            # 跳过连续的空行
+            continue
+        if entry.text.strip() == '':
+            merged.append(entry)
+            prev_text = entry.text
+            continue
+        # 合并文本完全相同的相邻行（非空），合并时间范围
+        if prev_text is not None and entry.text == prev_text and merged:
+            # 扩展上一条的结束时间
+            prev = merged[-1]
+            prev.end_time = entry.end_time
+        else:
+            merged.append(entry)
+            prev_text = entry.text
+    subtitle.entries = merged
+
+    # ── 3. 去除纯注释行（以 # 开头或 <i> 等残留） ──
+    subtitle.entries = [
+        e for e in subtitle.entries
+        if e.text.strip() != '' or e.start_time != e.end_time
+    ]
+
+    # ── 4. 时间统一为 SRT 格式 (HH:MM:SS,mmm) ──
+    for entry in subtitle.entries:
+        entry.start_time = _normalize_timestamp(entry.start_time)
+        entry.end_time = _normalize_timestamp(entry.end_time)
+
+    # ── 5. 重编号 ──
+    for i, entry in enumerate(subtitle.entries, start=1):
+        entry.index = i
+
+    return subtitle
+
+
+def _normalize_timestamp(ts: str) -> str:
+    """
+    将各种时间戳格式统一为 SRT 格式: HH:MM:SS,mmm
+
+    支持输入:
+    - SRT:     00:01:23,456
+    - VTT:     00:01:23.456
+    - ASS:     0:01:23.45 或 H:MM:SS.cc
+    """
+    ts = ts.strip()
+
+    # 匹配各种时间格式
+    # 格式1: H:MM:SS.cc (ASS, 厘秒) 或 H:MM:SS.ccc
+    # 格式2: HH:MM:SS,mmm (SRT, 毫秒)
+    # 格式3: HH:MM:SS.mmm (VTT, 毫秒)
+
+    # 统一替换：把逗号分隔符替换为点
+    ts = ts.replace(',', '.')
+
+    # 解析 ASS 格式: H:MM:SS.cc (2位厘秒)
+    m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})\.(\d{1,3})$', ts)
+    if m:
+        h = int(m.group(1))
+        mins = int(m.group(2))
+        secs = int(m.group(3))
+        frac = m.group(4)
+        # 如果是2位厘秒，补零变3位毫秒
+        if len(frac) == 2:
+            frac = frac + '0'
+        elif len(frac) == 1:
+            frac = frac + '00'
+        ms = int(frac[:3])
+        return f"{h:02d}:{mins:02d}:{secs:02d},{ms:03d}"
+
+    # 匹配 SRT/VTT 格式: HH:MM:SS.mmm
+    m = re.match(r'^(\d{2}):(\d{2}):(\d{2})\.(\d{3})$', ts)
+    if m:
+        h = int(m.group(1))
+        mins = int(m.group(2))
+        secs = int(m.group(3))
+        ms = int(m.group(4))
+        return f"{h:02d}:{mins:02d}:{secs:02d},{ms:03d}"
+
+    # 兜底：原样返回
+    return ts.replace('.', ',')
 
 
 # ═══════════════════════════════════════════════════════════
