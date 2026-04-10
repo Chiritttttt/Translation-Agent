@@ -241,6 +241,41 @@ def clean_subtitle_file(subtitle) -> object:
             merged.append(entry)
         subtitle.entries = merged
 
+    # ── 5.5. 合并渐进式字幕（YouTube 自动字幕等递增式字幕） ──
+    # YouTube 自动字幕特点：每条字幕是上一条的文本扩展，时间重叠。
+    # 例：条目A="Hello"，条目B="Hello World"，时间重叠 → 合并为一条
+    if len(subtitle.entries) > 1:
+        merged = [subtitle.entries[0]]
+        for i in range(1, len(subtitle.entries)):
+            prev = merged[-1]
+            curr = subtitle.entries[i]
+            prev_end_ms = _end_to_ms(prev)
+            curr_start_ms = _time_to_ms(curr)
+
+            # 使用 <=：合并后的 end 和下一条 start 可能精确相等
+            if curr_start_ms <= prev_end_ms:
+                prev_t = prev.text.strip()
+                curr_t = curr.text.strip()
+                if prev_t and curr_t:
+                    # 文本包含关系检测：
+                    # - startswith: A 是 B 的前缀（渐进扩展）
+                    # - endswith: A 是 B 的后缀（显示末行）
+                    is_contained = (
+                        curr_t.startswith(prev_t) or prev_t.startswith(curr_t) or
+                        curr_t.endswith(prev_t) or prev_t.endswith(curr_t)
+                    )
+                    if is_contained:
+                        # 保留更长的文本，延长结束时间
+                        if len(curr_t) > len(prev_t):
+                            prev.text = curr.text
+                        curr_end_ms = _end_to_ms(curr)
+                        if curr_end_ms > prev_end_ms:
+                            prev.end_time = curr.end_time
+                        continue
+
+            merged.append(curr)
+        subtitle.entries = merged
+
     # ── 6. 修复时间重叠（裁剪，确保每条 start >= 上一条 end） ──
     if len(subtitle.entries) > 1:
         for i in range(1, len(subtitle.entries)):
@@ -499,8 +534,13 @@ def parse_srt(text):
 
 
 def parse_vtt(text):
-    """解析 WebVTT 字幕文件"""
+    """解析 WebVTT 字幕文件（兼容 YouTube 自动字幕的空行格式）"""
     sub = SubtitleFile(format_type="vtt", header="WEBVTT")
+
+    # 预处理：YouTube 自动字幕在时间轴行和文本之间可能有空行
+    # 例：00:00:05.360 --> 00:00:08.350\n \nThank you...
+    # 将紧跟在 --> 时间行后面的空行合并为单个换行，确保时间和文本在同一块
+    text = re.sub(r'(-->[^\n]*)\n[ \t]*\n', r'\1\n', text)
 
     lines = text.strip().split("\n")
     header_lines = []
