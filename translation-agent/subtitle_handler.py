@@ -97,15 +97,16 @@ def clean_subtitle_entry(text: str) -> str:
 
 def clean_subtitle_file(subtitle) -> object:
     """
-    清洗字幕文件：
+    清洗字幕文件（时间轴安全版）：
     1. 清洗每条字幕文本（去除 HTML/ASS 标签、样式、特殊符号）
     2. 去除纯空行条目（无实际内容）
-    3. 合并相邻重复文本行（扩展时间范围）
-    4. 去除过短的噪声条目（少于 1 个有效字符，排除纯标点）
-    5. 按时间排序
-    6. 去除时间重叠（保留较早开始的条目）
-    7. 时间统一转为 SRT 格式 (HH:MM:SS,mmm)
-    8. 重编号
+    3. 去除过短的噪声条目（纯标点/单个符号不算有效内容）
+    4. 按开始时间排序
+    5. 合并相邻重复文本行（间隔 < 500ms 且不越界）
+    6. 修复时间重叠（裁剪后一条的开始时间，确保 start >= prev_end）
+    7. 验证时间轴完整性（start < end、无负间隔）
+    8. 时间统一转为 SRT 格式 (HH:MM:SS,mmm)
+    9. 重编号
 
     参数: subtitle - SubtitleFile 对象
     返回: 清洗后的 SubtitleFile 对象（原地修改并返回）
@@ -117,19 +118,16 @@ def clean_subtitle_file(subtitle) -> object:
     for entry in subtitle.entries:
         entry.text = clean_subtitle_entry(entry.text)
 
-    # ── 辅助函数：时间戳 → 毫秒（复用于合并/排序/去重） ──
+    # ── 辅助函数：时间戳 → 毫秒 ──
     def _time_to_ms(entry):
         try:
-            ts = entry.start_time.strip()
-            ts = ts.replace(',', '.')
+            ts = entry.start_time.strip().replace(',', '.')
             m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})\.(\d{1,3})$', ts)
             if m:
                 h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 frac = m.group(4)
-                if len(frac) == 2:
-                    frac = frac + '0'
-                elif len(frac) == 1:
-                    frac = frac + '00'
+                if len(frac) == 2: frac += '0'
+                elif len(frac) == 1: frac += '00'
                 ms = int(frac[:3])
                 return h * 3600000 + mi * 60000 + s * 1000 + ms
         except Exception:
@@ -138,77 +136,109 @@ def clean_subtitle_file(subtitle) -> object:
 
     def _end_to_ms(entry):
         try:
-            ts = entry.end_time.strip()
-            ts = ts.replace(',', '.')
+            ts = entry.end_time.strip().replace(',', '.')
             m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})\.(\d{1,3})$', ts)
             if m:
                 h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 frac = m.group(4)
-                if len(frac) == 2:
-                    frac = frac + '0'
-                elif len(frac) == 1:
-                    frac = frac + '00'
+                if len(frac) == 2: frac += '0'
+                elif len(frac) == 1: frac += '00'
                 ms = int(frac[:3])
                 return h * 3600000 + mi * 60000 + s * 1000 + ms
         except Exception:
             pass
         return 0
 
+    def _ms_to_time(ms):
+        """毫秒 → SRT 时间字符串"""
+        ms = max(0, int(ms))
+        h = ms // 3600000; ms %= 3600000
+        m = ms // 60000; ms %= 60000
+        s = ms // 1000; ms_r = ms % 1000
+        return f"{h:02d}:{m:02d}:{s:02d},{ms_r:03d}"
+
     # ── 2. 去除纯空行条目 ──
     subtitle.entries = [
-        e for e in subtitle.entries
-        if e.text.strip() != ''
+        e for e in subtitle.entries if e.text.strip() != ''
     ]
 
-    # ── 3. 合并相邻重复文本行（仅合并时间间隔 < 500ms 的同文本条目） ──
-    if len(subtitle.entries) > 1:
-        merged = []
-        for entry in subtitle.entries:
-            if merged and entry.text == merged[-1].text and entry.text.strip():
-                # 检查时间间隔，只有间隔很短的相邻同文本才合并
-                try:
-                    prev_end_ms = _end_to_ms(merged[-1])
-                    curr_start_ms = _time_to_ms(entry)
-                    if curr_start_ms - prev_end_ms <= 500:
-                        merged[-1].end_time = entry.end_time
-                        continue
-                except Exception:
-                    pass
-            merged.append(entry)
-        subtitle.entries = merged
-
-    # ── 4. 去除过短的噪声条目（纯标点/单个符号不算有效内容） ──
+    # ── 3. 去除过短的噪声条目 ──
     def _is_noise(text):
         t = text.strip()
         if not t:
             return True
-        # 纯标点/符号
         if re.match(r'^[\s\.\,\;\:\!\?\-\_\=\+\*\&\^\%\$\#\@\~\`\|\\\/\<\>\(\)\[\]\{\}\'"\"\u3000-\u303F\uFF00-\uFFEF]+$', t):
             return True
         return False
 
     subtitle.entries = [e for e in subtitle.entries if not _is_noise(e.text)]
 
-    # ── 5. 按开始时间排序 ──
+    # ── 4. 按开始时间排序 ──
     subtitle.entries.sort(key=_time_to_ms)
 
-    # ── 6. 去除时间重叠 ──
-    deduped = []
-    for entry in subtitle.entries:
-        if deduped and _time_to_ms(entry) < _time_to_ms(deduped[-1]):
-            # 开始时间早于上一条 → 跳过（时间重叠）
-            continue
-        deduped.append(entry)
-    subtitle.entries = deduped
+    # ── 5. 合并相邻重复文本行（间隔 < 500ms，且不越界） ──
+    if len(subtitle.entries) > 1:
+        merged = []
+        for i, entry in enumerate(subtitle.entries):
+            if merged and entry.text == merged[-1].text and entry.text.strip():
+                prev_end_ms = _end_to_ms(merged[-1])
+                curr_start_ms = _time_to_ms(entry)
+                gap = curr_start_ms - prev_end_ms
 
-    # ── 7. 时间统一为 SRT 格式 (HH:MM:SS,mmm)，并标记内部格式 ──
+                if gap <= 500 and gap >= -200:
+                    # 时间相邻或轻微重叠，安全合并
+                    # 但 end_time 不能超过下一条（不同文本）的 start_time
+                    new_end = entry.end_time
+                    if i + 1 < len(subtitle.entries):
+                        next_entry = subtitle.entries[i + 1]
+                        if next_entry.text != entry.text:
+                            next_start_ms = _time_to_ms(next_entry)
+                            new_end_ms = _end_to_ms(entry)
+                            if new_end_ms > next_start_ms:
+                                # 截止到下一条的 start_time，留 40ms 安全间隔
+                                new_end = _ms_to_time(max(next_start_ms - 40, prev_end_ms))
+                    merged[-1].end_time = new_end
+                    continue
+            merged.append(entry)
+        subtitle.entries = merged
+
+    # ── 6. 修复时间重叠（裁剪，确保每条 start >= 上一条 end） ──
+    if len(subtitle.entries) > 1:
+        for i in range(1, len(subtitle.entries)):
+            prev_end_ms = _end_to_ms(subtitle.entries[i - 1])
+            curr_start_ms = _time_to_ms(subtitle.entries[i])
+            curr_end_ms = _end_to_ms(subtitle.entries[i])
+
+            if curr_start_ms < prev_end_ms:
+                # 有重叠：将当前条目的 start 推到上一条 end 之后
+                new_start = prev_end_ms + 1  # 1ms 间隔
+                if curr_end_ms <= new_start:
+                    # 当前条目被完全吞噬，跳过
+                    subtitle.entries[i] = None
+                else:
+                    subtitle.entries[i].start_time = _ms_to_time(new_start)
+
+        # 去除被吞噬的条目
+        subtitle.entries = [e for e in subtitle.entries if e is not None]
+
+    # ── 7. 验证时间轴完整性 ──
+    valid = []
+    for entry in subtitle.entries:
+        start_ms = _time_to_ms(entry)
+        end_ms = _end_to_ms(entry)
+        if start_ms >= end_ms:
+            # start >= end 无效，自动修正：至少给 500ms 显示时长
+            entry.end_time = _ms_to_time(start_ms + 500)
+        valid.append(entry)
+    subtitle.entries = valid
+
+    # ── 8. 时间统一为 SRT 格式 (HH:MM:SS,mmm) ──
     for entry in subtitle.entries:
         entry.start_time = _normalize_timestamp(entry.start_time)
         entry.end_time = _normalize_timestamp(entry.end_time)
-    # 清洗后所有时间戳已统一为 SRT 格式，更新 format_type 避免导出时格式转换错误
     subtitle.format_type = "srt"
 
-    # ── 8. 重编号 ──
+    # ── 9. 重编号 ──
     for i, entry in enumerate(subtitle.entries, start=1):
         entry.index = i
 
