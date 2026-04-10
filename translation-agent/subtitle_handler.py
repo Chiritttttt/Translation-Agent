@@ -130,10 +130,12 @@ def clean_subtitle_file(subtitle) -> object:
         deduped.append(entry)
     subtitle.entries = deduped
 
-    # ── 7. 时间统一为 SRT 格式 (HH:MM:SS,mmm) ──
+    # ── 7. 时间统一为 SRT 格式 (HH:MM:SS,mmm)，并标记内部格式 ──
     for entry in subtitle.entries:
         entry.start_time = _normalize_timestamp(entry.start_time)
         entry.end_time = _normalize_timestamp(entry.end_time)
+    # 清洗后所有时间戳已统一为 SRT 格式，更新 format_type 避免导出时格式转换错误
+    subtitle.format_type = "srt"
 
     # ── 8. 重编号 ──
     for i, entry in enumerate(subtitle.entries, start=1):
@@ -548,13 +550,16 @@ def read_subtitle_file(file_path):
 # ═══════════════════════════════════════════════════════════
 
 def _apply_translations(subtitle, translated_texts):
-    """将翻译结果对位填充到字幕条目中"""
+    """将翻译结果对位填充到字幕条目中，自动清理残留编号前缀。"""
     trans_idx = 0
     for entry in subtitle.entries:
         if not entry.text.strip():
             continue
         if trans_idx < len(translated_texts):
-            entry.translated = translated_texts[trans_idx].strip()
+            text = translated_texts[trans_idx].strip()
+            # 清理 AI 可能残留的编号前缀 [001]、[1]、[01] 等
+            text = re.sub(r'^\s*\[\d{1,3}\]\s*', '', text)
+            entry.translated = text.strip()
             trans_idx += 1
 
 
@@ -786,11 +791,11 @@ def format_subtitle_for_translation(subtitle):
 
 
 def parse_subtitle_translation_response(response_text, expected_count):
-    """解析 AI 翻译结果"""
+    """解析 AI 翻译结果，兼容 [1] [01] [001] 等多种编号格式。"""
     translations = []
 
-    # 方法1: 匹配 [序号] 译文
-    pattern = re.compile(r"\[(\d{3})\]\s*(.+)")
+    # 方法1: 匹配 [序号] 译文（兼容 1-4 位数字）
+    pattern = re.compile(r"\[(\d{1,4})\]\s*(.+)")
     matches = pattern.findall(response_text)
     if matches and len(matches) >= expected_count * 0.5:
         ordered = sorted(matches, key=lambda x: int(x[0]))
@@ -802,9 +807,11 @@ def parse_subtitle_translation_response(response_text, expected_count):
     # 方法2: 直接按行分割
     lines = [l.strip() for l in response_text.strip().split("\n") if l.strip()]
     if len(lines) >= expected_count * 0.5:
-        return lines[:expected_count]
+        # 行首有编号残留的话先清理
+        cleaned = [re.sub(r"^\s*\[\d{1,4}\]\s*", "", l) for l in lines]
+        return cleaned[:expected_count]
 
-    # 方法3: 去除序号前缀后匹配
+    # 方法3: 去除序号前缀后匹配（兜底）
     cleaned_lines = []
     for line in response_text.strip().split("\n"):
         line = re.sub(r"^\s*\[\d+\]\s*", "", line).strip()
