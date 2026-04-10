@@ -847,15 +847,13 @@ class MainWindow(QMainWindow):
         sl.setSpacing(24)
         sl.setContentsMargins(20, 16, 20, 16)
 
-        # 卡片内小标题
+        # 卡片小标题（放在卡片上方）
         settings_title = QLabel("翻译设置")
         settings_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 13, QFont.Weight.Bold))
         settings_title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
 
-        settings_col = QVBoxLayout()
-        settings_col.addWidget(settings_title)
-        settings_col.addLayout(sl)
-        layout.addLayout(settings_col)
+        layout.addWidget(settings_title)
+        layout.addWidget(sg)
 
         for lbl_text, items, attr in [
             ("源语言", ["English","Chinese","Japanese"], "source_lang"),
@@ -962,10 +960,7 @@ class MainWindow(QMainWindow):
 
         il.addWidget(self.tabs)
 
-        input_col = QVBoxLayout()
-        input_col.addWidget(input_title)
-        input_col.addWidget(ig)
-        layout.addLayout(input_col)
+        layout.addWidget(ig)
 
         # ── 操作栏 ──
         btn_row = QHBoxLayout()
@@ -1085,10 +1080,7 @@ class MainWindow(QMainWindow):
 
         rl.addWidget(self.result_tabs)
 
-        result_col = QVBoxLayout()
-        result_col.addWidget(result_title)
-        result_col.addWidget(rg)
-        layout.addLayout(result_col, stretch=1)
+        layout.addWidget(rg, stretch=1)
 
     def _ocr_progress_handler(self, current, total, message):
         """OCR 进度回调，在主线程安全地更新 UI"""
