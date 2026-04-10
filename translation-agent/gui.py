@@ -596,6 +596,72 @@ def step5_final(draft, critique, target_lang):
 
 
 # ═══════════════════════════════════════════════════════════
+# 字幕翻译线程
+# ═══════════════════════════════════════════════════════════
+class SubtitleWorker(QThread):
+    """字幕翻译：逐条翻译，保留时间轴"""
+    progress = pyqtSignal(str, int)
+    finished = pyqtSignal(object, list)  # SubtitleFile, translated_texts
+    error = pyqtSignal(str)
+
+    def __init__(self, subtitle, source_lang, target_lang):
+        super().__init__()
+        self.subtitle = subtitle
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+
+    def run(self):
+        try:
+            from subtitle_handler import (
+                build_subtitle_translate_prompt,
+                format_subtitle_for_translation,
+                parse_subtitle_translation_response,
+                _apply_translations,
+            )
+            from glossary import get_glossary_prompt_block
+
+            self.progress.emit("准备字幕翻译...", 1)
+
+            sys_prompt = build_subtitle_translate_prompt(
+                self.source_lang, self.target_lang)
+
+            glossary_block = get_glossary_prompt_block(
+                self.source_lang, self.target_lang)
+            if glossary_block:
+                sys_prompt += "\n\n" + glossary_block
+
+            batch_size = 50
+            all_translated = []
+            entries_with_text = [e for e in self.subtitle.entries if e.text.strip()]
+            total_batches = (len(entries_with_text) + batch_size - 1) // batch_size
+
+            for batch_idx in range(total_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, len(entries_with_text))
+                batch_entries = entries_with_text[start:end]
+
+                self.progress.emit(
+                    f"翻译字幕 {start+1}-{end}/{len(entries_with_text)}...",
+                    2 + int(3 * batch_idx / max(total_batches, 1)))
+
+                batch_input = "\n".join(
+                    f"[{i+1:03d}] {e.text}" for i, e in enumerate(batch_entries))
+
+                response = chat(sys_prompt, batch_input, temperature=0.3)
+                batch_translated = parse_subtitle_translation_response(
+                    response, len(batch_entries))
+
+                all_translated.extend(batch_translated)
+
+            _apply_translations(self.subtitle, all_translated)
+            self.progress.emit("字幕翻译完成！", 5)
+            self.finished.emit(self.subtitle, all_translated)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ═══════════════════════════════════════════════════════════
 # 翻译线程
 # ═══════════════════════════════════════════════════════════
 class TranslateWorker(QThread):
@@ -804,6 +870,10 @@ class MainWindow(QMainWindow):
         self.last_source = ""
         self.last_analysis = ""
         self.last_critique = ""
+        # 字幕相关状态
+        self.subtitle_obj = None      # SubtitleFile 对象
+        self.subtitle_path = None     # 导入的字幕文件路径
+        self.subtitle_worker = None   # SubtitleWorker 线程
         self.setup_ui()
         self.apply_styles()
 
@@ -832,7 +902,7 @@ class MainWindow(QMainWindow):
         title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
         header_layout.addWidget(title)
 
-        sub = QLabel("支持 PDF / Word / Excel / PPT  ·  分析 → 提示 → 初译 → 审校 → 终稿")
+        sub = QLabel("支持 PDF / Word / Excel / PPT / 字幕(SRT/VTT/ASS)  ·  分析 → 提示 → 初译 → 审校 → 终稿")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent; border: none; letter-spacing: 0.5px;")
         header_layout.addWidget(sub)
@@ -968,6 +1038,79 @@ class MainWindow(QMainWindow):
         fl.addLayout(fbl)
         fl.addStretch()
         self.tabs.addTab(fw, "  上传文件  ")
+
+        # Tab 4: 字幕翻译
+        sw = QWidget()
+        sl_layout = QVBoxLayout(sw)
+        sl_layout.setContentsMargins(8, 12, 8, 8)
+
+        sub_btn_row = QHBoxLayout()
+        self.sub_file_btn = QPushButton("导入字幕")
+        self.sub_file_btn.setObjectName("outlineBtn")
+        self.sub_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sub_file_btn.clicked.connect(self.choose_subtitle_file)
+        self.sub_file_label = QLabel("支持 .srt / .vtt / .ass / .ssa")
+        self.sub_file_label.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; border: none; background: transparent;")
+        sub_btn_row.addWidget(self.sub_file_btn)
+        sub_btn_row.addWidget(self.sub_file_label)
+        sub_btn_row.addStretch()
+        sl_layout.addLayout(sub_btn_row)
+
+        # 输出模式选择行
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(12)
+        mode_lbl = QLabel("输出模式：")
+        mode_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        mode_row.addWidget(mode_lbl)
+        self.sub_mode_combo = QComboBox()
+        self.sub_mode_combo.setMinimumWidth(240)
+        self.sub_mode_combo.setFixedHeight(34)
+        self.sub_mode_combo.addItems([
+            "双语字幕（原文+译文，带时间轴）",
+            "纯译文（仅译文，带时间轴）",
+            "Clean 纯文本（仅译文，无时间轴）",
+            "Clean 双语（原文+译文，无时间轴）",
+        ])
+        mode_row.addWidget(self.sub_mode_combo)
+        fmt_lbl = QLabel("输出格式：")
+        fmt_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        mode_row.addWidget(fmt_lbl)
+        self.sub_fmt_combo = QComboBox()
+        self.sub_fmt_combo.setMinimumWidth(120)
+        self.sub_fmt_combo.setFixedHeight(34)
+        self.sub_fmt_combo.addItems(["同原格式", "SRT (.srt)", "VTT (.vtt)", "ASS (.ass)"])
+        mode_row.addWidget(self.sub_fmt_combo)
+        mode_row.addStretch()
+        sl_layout.addLayout(mode_row)
+
+        # 字幕预览
+        self.sub_preview = QTextEdit()
+        self.sub_preview.setReadOnly(True)
+        self.sub_preview.setPlaceholderText("导入字幕文件后，此处显示预览...")
+        self.sub_preview.setMinimumHeight(70)
+        sl_layout.addWidget(self.sub_preview)
+
+        # 字幕操作按钮
+        sub_action_row = QHBoxLayout()
+        self.sub_translate_btn = QPushButton("  翻译字幕  ")
+        self.sub_translate_btn.setObjectName("primaryBtn")
+        self.sub_translate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sub_translate_btn.setMinimumHeight(36)
+        self.sub_translate_btn.clicked.connect(self.do_subtitle_translate)
+        self.sub_translate_btn.setEnabled(False)
+        self.sub_export_btn = QPushButton("  导出字幕  ")
+        self.sub_export_btn.setObjectName("outlineBtn")
+        self.sub_export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sub_export_btn.setMinimumHeight(36)
+        self.sub_export_btn.clicked.connect(self.do_subtitle_export)
+        self.sub_export_btn.setEnabled(False)
+        sub_action_row.addWidget(self.sub_translate_btn, stretch=0)
+        sub_action_row.addSpacing(8)
+        sub_action_row.addWidget(self.sub_export_btn)
+        sub_action_row.addStretch()
+        sl_layout.addLayout(sub_action_row)
+
+        self.tabs.addTab(sw, "  字幕翻译  ")
 
         il.addWidget(self.tabs)
 
@@ -1406,6 +1549,144 @@ class MainWindow(QMainWindow):
         if text:
             QApplication.clipboard().setText(text)
             QMessageBox.information(self, "成功", "已复制译文")
+
+    # ═══════════════════════════════════════════════════════════
+    # 字幕翻译
+    # ═══════════════════════════════════════════════════════════
+
+    def choose_subtitle_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入字幕文件", "",
+            "字幕文件 (*.srt *.vtt *.ass *.ssa);;所有文件 (*)"
+        )
+        if not path:
+            return
+        try:
+            from subtitle_handler import read_subtitle_file
+            sub = read_subtitle_file(path)
+            self.subtitle_obj = sub
+            self.subtitle_path = path
+
+            preview_lines = [f"文件: {os.path.basename(path)}"]
+            preview_lines.append(f"格式: {sub.format_type.upper()}")
+            preview_lines.append(f"条目数: {sub.entry_count}")
+            preview_lines.append(f"总时长: {sub.entries[-1].end_time if sub.entries else 'N/A'}")
+            preview_lines.append("")
+            preview_lines.append("── 预览（前 20 条）──")
+            for entry in sub.entries[:20]:
+                preview_lines.append(f"[{entry.start_time} --> {entry.end_time}]  {entry.text}")
+            if sub.entry_count > 20:
+                preview_lines.append(f"\n... 还有 {sub.entry_count - 20} 条")
+
+            self.sub_preview.setPlainText("\n".join(preview_lines))
+            self.sub_file_label.setText(f"已加载: {os.path.basename(path)} ({sub.entry_count} 条)")
+            self.sub_translate_btn.setEnabled(True)
+            self.sub_export_btn.setEnabled(False)
+
+            fmt_map = {"srt": 0, "vtt": 1, "ass": 2, "ssa": 2}
+            idx = fmt_map.get(sub.format_type, 0)
+            self.sub_fmt_combo.setCurrentIndex(idx)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"字幕文件读取失败：{str(e)}")
+
+    def do_subtitle_translate(self):
+        if not self.subtitle_obj:
+            QMessageBox.warning(self, "提示", "请先导入字幕文件。")
+            return
+        if not self.subtitle_obj.entries:
+            QMessageBox.warning(self, "提示", "字幕文件为空。")
+            return
+
+        self.sub_translate_btn.setEnabled(False)
+        self.sub_export_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 5)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("")
+
+        self.subtitle_worker = SubtitleWorker(
+            subtitle=self.subtitle_obj,
+            source_lang=self.source_lang.currentText(),
+            target_lang=self.target_lang.currentText(),
+        )
+        self.subtitle_worker.progress.connect(self.on_progress)
+        self.subtitle_worker.finished.connect(self.on_subtitle_finished)
+        self.subtitle_worker.error.connect(self.on_subtitle_error)
+        self.subtitle_worker.start()
+
+    def on_subtitle_finished(self, subtitle, translated_texts):
+        self.subtitle_obj = subtitle
+        self.sub_translate_btn.setEnabled(True)
+        self.sub_export_btn.setEnabled(True)
+
+        preview_lines = ["翻译完成！双语预览："]
+        preview_lines.append("")
+        translated_count = sum(1 for e in subtitle.entries if e.translated)
+        preview_lines.append(f"已翻译: {translated_count}/{subtitle.entry_count} 条")
+        preview_lines.append("")
+        for entry in subtitle.entries[:30]:
+            preview_lines.append(f"[{entry.start_time} --> {entry.end_time}]")
+            preview_lines.append(f"  {entry.text}")
+            if entry.translated:
+                preview_lines.append(f"  {entry.translated}")
+            preview_lines.append("")
+        if subtitle.entry_count > 30:
+            preview_lines.append(f"... 还有 {subtitle.entry_count - 30} 条")
+
+        self.sub_preview.setPlainText("\n".join(preview_lines))
+        self.progress_label.setText(f"字幕翻译完成！共 {translated_count}/{subtitle.entry_count} 条")
+        self.progress_bar.setValue(5)
+
+    def on_subtitle_error(self, msg):
+        QMessageBox.critical(self, "字幕翻译错误", msg)
+        self.progress_label.setText("")
+        self.progress_bar.setValue(0)
+        self.sub_translate_btn.setEnabled(True)
+
+    def do_subtitle_export(self):
+        if not self.subtitle_obj:
+            QMessageBox.warning(self, "提示", "请先完成字幕翻译。")
+            return
+
+        from subtitle_handler import export_subtitle, generate_subtitle_output_name
+
+        mode_map = {0: "bilingual", 1: "translated", 2: "clean", 3: "clean_bilingual"}
+        mode = mode_map.get(self.sub_mode_combo.currentIndex(), "bilingual")
+
+        fmt_idx = self.sub_fmt_combo.currentIndex()
+        if fmt_idx == 0:
+            fmt = self.subtitle_obj.format_type
+        elif fmt_idx == 1:
+            fmt = "srt"
+        elif fmt_idx == 2:
+            fmt = "vtt"
+        else:
+            fmt = "ass"
+
+        ext_map = {"srt": ".srt", "vtt": ".vtt", "ass": ".ass"}
+        ext = ext_map.get(fmt, ".srt")
+
+        default_name = generate_subtitle_output_name(
+            self.subtitle_path or "subtitle.srt",
+            mode=mode,
+            source_lang=self.source_lang.currentText(),
+            target_lang=self.target_lang.currentText(),
+        )
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "导出字幕", default_name,
+            f"{fmt.upper()} 字幕 (*{ext});;所有文件 (*)"
+        )
+        if not out_path:
+            return
+
+        try:
+            export_subtitle(self.subtitle_obj, out_path, mode=mode)
+            QMessageBox.information(self, "导出成功",
+                f"字幕已保存：\n{out_path}\n\n"
+                f"格式: {fmt.upper()} | 模式: {mode}\n"
+                f"条目数: {self.subtitle_obj.entry_count}")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
 
     def open_glossary_manager(self):
         """打开术语库管理窗口 — Arco Design 风格"""
