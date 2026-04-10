@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QLineEdit, QTextEdit, QPushButton, QFileDialog,
     QTabWidget, QMessageBox, QGroupBox, QProgressBar, QDialog,
     QRadioButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QSizePolicy,
-    QHeaderView, QTableWidget, QTableWidgetItem, QGridLayout,
+    QHeaderView, QTableWidget, QTableWidgetItem, QGridLayout, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
@@ -746,7 +746,8 @@ def step1_analyze(text, source_lang, target_lang, audience, style):
     return full_analysis
 
 
-def step2_build_prompt(analysis, source_lang, target_lang, audience, style):
+def step2_build_prompt(analysis, source_lang, target_lang, audience, style,
+                       compact_analysis=None):
     from glossary import get_glossary_prompt_block
 
     if style == "auto" or not style.strip():
@@ -757,6 +758,13 @@ Reproduce this tone faithfully in {target_lang}. Match register, rhythm, persona
 Apply this style consistently across full text."""
 
     glossary_block = get_glossary_prompt_block(source_lang, target_lang)
+
+    # 精简模式：用术语+风格摘要替代完整分析
+    context_block = ""
+    if compact_analysis:
+        context_block = f"## Content Background (精简)\n{compact_analysis}\n"
+    elif analysis:
+        context_block = f"## Content Background\n{analysis}\n"
 
     prompt_full = f"""You are a professional translator. Translate from {source_lang} to {target_lang}.
 Think and reason entirely in {target_lang}.
@@ -769,9 +777,7 @@ Think and reason entirely in {target_lang}.
 
 {glossary_block}
 
-## Content Background
-{analysis}
-
+{context_block}
 ## Translation Principles
 - Complete every sentence, no omission / summarization
 - Accuracy first, meaning over literal word
@@ -797,8 +803,9 @@ Keep paragraph count similar, preserve format fully. Only output pure translatio
     return "\n\n".join(results)
 
 
-def step4_critique(source_text, draft, analysis, source_lang, target_lang):
-    """审校译文 — 长文档分段审校，避免截断。"""
+def step4_critique(source_text, draft, analysis, source_lang, target_lang,
+                   compact_terms_hint=None):
+    """审校译文 — 长文档分段审校，避免截断。精简模式只传术语。"""
     # 对长文档进行分段审校
     max_len = 6000
     src_chunks = [source_text[i:i+max_len] for i in range(0, len(source_text), max_len)]
@@ -810,6 +817,13 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang):
         d = draft_chunks[i] if i < len(draft_chunks) else ""
         if s or d:
             pairs.append((s, d))
+
+    # 精简模式：只传术语表，不传完整分析
+    reference_block = ""
+    if compact_terms_hint:
+        reference_block = f"术语参考：\n{compact_terms_hint}"
+    else:
+        reference_block = f"分析要点：\n{analysis[:2000]}"
 
     critiques = []
     for idx, (src_part, draft_part) in enumerate(pairs):
@@ -826,7 +840,7 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang):
 
 原文：\n{src_part}
 译文：\n{draft_part}
-分析要点：\n{analysis[:2000]}"""
+{reference_block}"""
         )
         critiques.append(critique)
 
@@ -880,13 +894,14 @@ class SubtitleWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, subtitle, source_lang, target_lang,
-                 style="", audience=""):
+                 style="", audience="", compact=False):
         super().__init__()
         self.subtitle = subtitle
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.style = style or ""
         self.audience = audience or ""
+        self.compact = compact
 
     # ── 第一步：AI 分析字幕内容 ──
     def _step_analyze(self, source_text):
@@ -957,8 +972,15 @@ class SubtitleWorker(QThread):
         return full_analysis
 
     # ── 第二步：组装翻译提示 ──
-    def _step_build_prompt(self, analysis):
+    def _step_build_prompt(self, analysis, compact_analysis=None):
         from glossary import get_glossary_prompt_block
+
+        # 精简模式：只用术语+风格摘要（省 ~60% token），不用完整分析报告
+        context_block = ""
+        if self.compact and compact_analysis:
+            context_block = f"## Content Background (精简)\n{compact_analysis}\n"
+        elif analysis:
+            context_block = f"## Content Background\n{analysis}\n"
 
         if self.style == "auto" or not self.style.strip():
             style_block = f"""The source text's tone is extracted from analysis above.
@@ -982,9 +1004,7 @@ Think and reason entirely in {self.target_lang}.
 
 {glossary_block}
 
-## Content Background
-{analysis}
-
+{context_block}
 ## Subtitle Translation Principles
 - Translate EACH line independently, output EXACTLY the same number of lines
 - Keep translations concise and natural — suitable for on-screen subtitle reading
@@ -1029,7 +1049,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
         return all_translated
 
     # ── 第四步：审校 ──
-    def _step_critique(self, source_text, draft_text, analysis):
+    def _step_critique(self, source_text, draft_text, analysis, terms_hint=None):
         max_len = 6000
         src_chunks = [source_text[i:i+max_len] for i in range(0, len(source_text), max_len)]
         draft_chunks = [draft_text[i:i+max_len] for i in range(0, len(draft_text), max_len)]
@@ -1039,6 +1059,14 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
             d = draft_chunks[i] if i < len(draft_chunks) else ""
             if s or d:
                 pairs.append((s, d))
+
+        # 精简模式：审校只传术语表（~100 tokens），不传完整分析（~3000 tokens）
+        # 但仍然全文分段审校，确保覆盖完整
+        reference_block = ""
+        if self.compact and terms_hint:
+            reference_block = f"术语参考：\n{terms_hint}"
+        else:
+            reference_block = f"分析要点：\n{analysis[:2000]}"
 
         critiques = []
         for idx, (src_part, draft_part) in enumerate(pairs):
@@ -1055,7 +1083,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
 
 原文：\n{src_part}
 译文：\n{draft_part}
-分析要点：\n{analysis[:2000]}"""
+{reference_block}"""
             )
             critiques.append(critique)
 
@@ -1098,7 +1126,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
                 parse_subtitle_translation_response,
                 _apply_translations,
             )
-            from glossary import extract_terms_from_analysis, add_terms_batch
+            from glossary import extract_terms_from_analysis, add_terms_batch, get_glossary_prompt_block
 
             entries_with_text = [e for e in self.subtitle.entries if e.text.strip()]
             source_text = "\n".join(
@@ -1115,9 +1143,18 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
                 added, _ = add_terms_batch(new_terms, self.source_lang, self.target_lang)
                 self.progress.emit(f"术语入库：新增 {added} 条", 1)
 
+            # ── 精简模式：从完整分析中提取术语+风格摘要 ──
+            compact_analysis = None
+            terms_hint = None
+            if self.compact:
+                from glossary import extract_compact_analysis
+                compact_analysis = extract_compact_analysis(analysis)
+                terms_hint = get_glossary_prompt_block(self.source_lang, self.target_lang)
+                self.progress.emit("精简模式：已提取术语+风格摘要", 2)
+
             # ── 第二步：组装提示 ──
             self.progress.emit("第二步：组装翻译提示...", 2)
-            prompt = self._step_build_prompt(analysis)
+            prompt = self._step_build_prompt(analysis, compact_analysis)
 
             # ── 第三步：初译 ──
             self.progress.emit("第三步：初译字幕...", 3)
@@ -1127,9 +1164,9 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
             draft_text = "\n".join(
                 f"[{i+1:03d}] {t}" for i, t in enumerate(all_translated))
 
-            # ── 第四步：审校 ──
+            # ── 第四步：审校（全文分段，精简模式只传术语） ──
             self.progress.emit("第四步：审校译文...", 4)
-            critique = self._step_critique(source_text, draft_text, analysis)
+            critique = self._step_critique(source_text, draft_text, analysis, terms_hint)
             self.critique_done.emit(critique)
 
             # ── 第五步：终稿润色 ──
@@ -1160,13 +1197,14 @@ class TranslateWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, source_text, source_lang, target_lang,
-                 style, audience):
+                 style, audience, compact=False):
         super().__init__()
         self.source_text = source_text
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.style = style
         self.audience = audience
+        self.compact = compact
 
     def run(self):
         try:
@@ -1175,23 +1213,35 @@ class TranslateWorker(QThread):
                                      self.target_lang, self.audience, self.style)
             self.analysis_done.emit(analysis)
 
-            from glossary import extract_terms_from_analysis, add_terms_batch
+            from glossary import extract_terms_from_analysis, add_terms_batch, get_glossary_prompt_block
             new_terms = extract_terms_from_analysis(analysis, self.source_lang, self.target_lang)
             if new_terms:
                 added, _ = add_terms_batch(new_terms, self.source_lang, self.target_lang)
                 self.progress.emit(f"术语入库：新增 {added} 条", 1)
 
+            # 精简模式：提取术语+风格摘要
+            compact_analysis = None
+            terms_hint = None
+            if self.compact:
+                from glossary import extract_compact_analysis
+                compact_analysis = extract_compact_analysis(analysis)
+                terms_hint = get_glossary_prompt_block(self.source_lang, self.target_lang)
+
             self.progress.emit("第二步：组装提示...", 2)
-            prompt = step2_build_prompt(analysis, self.source_lang,
-                                        self.target_lang, self.audience, self.style)
+            prompt = step2_build_prompt(
+                analysis if not self.compact else None,
+                self.source_lang, self.target_lang, self.audience, self.style,
+                compact_analysis=compact_analysis)
 
             self.progress.emit("第三步：初译...", 3)
             draft = step3_draft(self.source_text, prompt,
                                 self.source_lang, self.target_lang)
 
             self.progress.emit("第四步：审校...", 4)
-            critique = step4_critique(self.source_text, draft, analysis,
-                                      self.source_lang, self.target_lang)
+            critique = step4_critique(
+                self.source_text, draft, analysis,
+                self.source_lang, self.target_lang,
+                compact_terms_hint=terms_hint if self.compact else None)
             self.critique_done.emit(critique)
 
             self.progress.emit("第五步：终稿润色...", 5)
@@ -1508,6 +1558,22 @@ class MainWindow(QMainWindow):
         self.audience_input.setFixedHeight(34)
         self.audience_input.setMinimumWidth(140)
         lang_row.addWidget(self.audience_input)
+
+        # 精简分析（省 Token）
+        self.compact_analysis_cb = QCheckBox()
+        self.compact_analysis_cb.setToolTip(
+            "开启后，分析报告只提取术语表和风格摘要，\n"
+            "初译和审校不再携带完整分析报告，可节省约 40% Token。\n"
+            "关闭则使用完整分析，翻译质量更高。"
+        )
+        compact_lbl = QLabel("精简省Token")
+        compact_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+        compact_tip = QLabel("(?)")
+        compact_tip.setStyleSheet(f"color: {C.PRIMARY}; font-size: 14px; font-weight: 700; border: none; background: transparent;")
+        compact_tip.setToolTip(self.compact_analysis_cb.toolTip())
+        lang_row.addWidget(compact_lbl)
+        lang_row.addWidget(self.compact_analysis_cb)
+        lang_row.addWidget(compact_tip)
 
         lang_row.addStretch()
         sl.addLayout(lang_row)
@@ -1876,6 +1942,7 @@ class MainWindow(QMainWindow):
             target_lang=self._get_target_lang(),
             style=self.style_input.text(),
             audience=self.audience_input.text(),
+            compact=self.compact_analysis_cb.isChecked() if hasattr(self, 'compact_analysis_cb') else False,
         )
         self.worker.progress.connect(self.on_progress)
         self.worker.analysis_done.connect(self.on_analysis_done)
@@ -2213,6 +2280,7 @@ class MainWindow(QMainWindow):
             self._get_target_lang(),
             style=self.style_input.text() if hasattr(self, 'style_input') else "",
             audience=self.audience_input.text() if hasattr(self, 'audience_input') else "",
+            compact=self.compact_analysis_cb.isChecked() if hasattr(self, 'compact_analysis_cb') else False,
         )
         self.subtitle_worker.progress.connect(self._on_subtitle_progress)
         self.subtitle_worker.analysis_done.connect(self._on_subtitle_analysis_done)

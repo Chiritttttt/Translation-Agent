@@ -271,6 +271,79 @@ def extract_terms_from_analysis(analysis_text, source_lang, target_lang):
     return unique_terms
 
 
+# ─── 精简分析提取 ──────────────────────────────────────────
+
+def extract_compact_analysis(analysis_text):
+    """从完整分析报告中提取精简版：术语表 + 风格摘要。
+
+    用于精简模式（省 Token），将 ~3000 tokens 的完整分析压缩到 ~200-400 tokens。
+
+    Args:
+        analysis_text: 完整的 AI 分析报告文本
+
+    Returns:
+        str: 精简后的分析文本（术语表 + 风格一行摘要）
+    """
+    lines = analysis_text.split("\n")
+    sections = {"terms": [], "style": [], "difficulties": []}
+    current_section = None
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # 检测 section 切换
+        if "术语" in stripped and ("表" in stripped or "词汇" in stripped):
+            current_section = "terms"
+            continue
+        elif "风格" in stripped or "语气" in stripped:
+            current_section = "style"
+            continue
+        elif "难点" in stripped or "文化" in stripped:
+            current_section = "difficulties"
+            continue
+        elif "修辞" in stripped or "隐喻" in stripped:
+            current_section = None  # 跳过修辞
+            continue
+        elif "概要" in stripped:
+            current_section = None
+            continue
+        elif stripped.startswith("##") or stripped.startswith("###"):
+            # 非术语/风格相关的标题，跳过
+            if current_section not in ("terms", "style"):
+                current_section = None
+            continue
+
+        if current_section and current_section in sections:
+            # 术语段：只保留含分隔符的行
+            if current_section == "terms":
+                if any(c in stripped for c in ["→", "➡", ">", "：", ":", "／", "/"]) and not stripped.startswith("#"):
+                    sections["terms"].append(stripped)
+            else:
+                # 风格/难点：保留所有非空行
+                if not stripped.startswith("#"):
+                    sections[current_section].append(stripped)
+
+    # 组装精简版
+    parts = []
+
+    if sections["terms"]:
+        parts.append("## 术语表")
+        parts.extend(sections["terms"][:50])  # 最多 50 条术语
+
+    if sections["style"]:
+        # 风格只保留核心要点（取前 5 行）
+        parts.append("## 风格要点")
+        parts.extend(sections["style"][:5])
+
+    if not parts:
+        # 兜底：返回前 500 字符
+        return analysis_text[:500]
+
+    return "\n".join(parts)
+
+
 # ─── 查询术语库 ──────────────────────────────────────────
 
 def get_terms(source_lang, target_lang, category=None):
