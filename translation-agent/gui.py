@@ -1114,11 +1114,18 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(arco_global_stylesheet())
 
     def _swap_languages(self):
-        """交换源语言和目标语言"""
-        src_idx = self.source_lang.currentIndex()
-        tgt_idx = self.target_lang.currentIndex()
-        self.source_lang.setCurrentIndex(tgt_idx)
-        self.target_lang.setCurrentIndex(src_idx)
+        """交换源语言和目标语言（按文本匹配，避免因列表顺序不同导致失效）"""
+        src_text = self.source_lang.currentText()
+        tgt_text = self.target_lang.currentText()
+        if src_text == tgt_text:
+            return
+        # 在目标语言列表中找源语言文本
+        src_idx_in_tgt = self.target_lang.findText(src_text)
+        tgt_idx_in_src = self.source_lang.findText(tgt_text)
+        if tgt_idx_in_src >= 0:
+            self.source_lang.setCurrentIndex(tgt_idx_in_src)
+        if src_idx_in_tgt >= 0:
+            self.target_lang.setCurrentIndex(src_idx_in_tgt)
 
     def setup_ui(self):
         C = ArcoColors
@@ -1188,21 +1195,25 @@ class MainWindow(QMainWindow):
         lang_row.addWidget(self.source_lang)
 
         # 交换按钮
-        swap_btn = QPushButton("SWAP")
-        swap_btn.setFixedSize(50, 34)
+        swap_btn = QPushButton("⇄")
+        swap_btn.setObjectName("swapBtn")
+        swap_btn.setFixedSize(40, 34)
         swap_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        swap_btn.setToolTip("交换源语言与目标语言")
         swap_btn.setStyleSheet(f"""
-            QPushButton {{
+            QPushButton#swapBtn {{
                 background: {C.PRIMARY};
                 color: #FFFFFF;
                 border: none;
                 border-radius: 6px;
-                font-size: 11px;
+                font-size: 16px;
                 font-weight: 700;
-                letter-spacing: 1px;
             }}
-            QPushButton:hover {{
+            QPushButton#swapBtn:hover {{
                 background: {C.PRIMARY_HOVER};
+            }}
+            QPushButton#swapBtn:pressed {{
+                background: {C.PRIMARY_ACTIVE};
             }}
         """)
         swap_btn.clicked.connect(self._swap_languages)
@@ -1956,6 +1967,12 @@ class MainWindow(QMainWindow):
     def _on_subtitle_progress(self, msg, step):
         self.progress_label.setText(msg)
         self.progress_bar.setValue(step)
+
+    def _on_subtitle_error(self, msg):
+        QMessageBox.critical(self, "字幕翻译错误", msg)
+        self.progress_label.setText("")
+        self.sub_translate_btn.setEnabled(True)
+        self.sub_export_btn.setEnabled(True)
 
     def _on_subtitle_finished(self, subtitle, translated):
             self.subtitle_obj = subtitle

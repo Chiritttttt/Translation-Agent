@@ -8,7 +8,6 @@
 
 import re
 import os
-from datetime import timedelta
 
 
 def clean_subtitle_entry(text: str) -> str:
