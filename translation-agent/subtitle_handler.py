@@ -11,10 +11,19 @@ import os
 
 
 def clean_subtitle_entry(text: str) -> str:
-    """清洗单条字幕文本，去除所有格式标记，保留纯文本。"""
-    # ── 去除 ASS/SSA 覆盖标签 {\xxx}（可能嵌套大括号） ──
-    # 先处理简单的 {\xxx} 模式
-    text = re.sub(r'\{[^}]*\}', '', text)
+    """清洗单条字幕文本：去除所有标签、样式、转义序列、特殊字符"""
+    if not text:
+        return ""
+
+    # 1. 去除 ASS 注释行（; 开头）
+    lines = text.split('\n')
+    lines = [l for l in lines if not l.strip().startswith(';')]
+    text = '\n'.join(lines)
+
+    # 2. 去除 ASS 绘制命令 {\p0}, {\p1} 等（完整标签）
+    text = re.sub(r'\{\\p\d*\}', '', text)
+
+    # 3. 去除所有 ASS 覆盖标签 {...}（包含样式、颜色、特效等）
     # 多次处理直到没有嵌套残留（最多 5 轮）
     for _ in range(5):
         new_text = re.sub(r'\{[^}]*\}', '', text)
@@ -22,28 +31,65 @@ def clean_subtitle_entry(text: str) -> str:
             break
         text = new_text
 
-    # ── 去除 HTML 标签（含自闭标签 <br/> <font ...> 等） ──
+    # 4. 去除残留的未闭合 ASS 标签（行末 { 开头但没有 } 闭合）
+    text = re.sub(r'\{[^}]*$', '', text, flags=re.MULTILINE)
+
+    # 5. 去除 HTML 标签（<font>, <b>, <i>, </b> 等，含未闭合标签）
     text = re.sub(r'<[^>]*>', '', text)
-    # 处理未闭合标签（如 <i 或 <b 残留）
     text = re.sub(r'</?(?:i|b|u|font|span|div|c|N|n|highlight)\b[^>]*', '', text, flags=re.IGNORECASE)
 
-    # ── 去除 ASS 样式转义序列 ──
-    text = re.sub(r'\\[nNrN]', '\n', text)       # \N → 换行
-    text = re.sub(r'\\[hab]', ' ', text)          # \h \a \b → 空格
+    # 6. 去除 ASS 行内转义序列（30+ 种常见转义）
+    text = re.sub(r'\\[Nnh]', ' ', text)          # \N \n \h → 空格
+    text = re.sub(r'\\pos\([^)]*\)', '', text)    # \pos(x,y)
+    text = re.sub(r'\\move\([^)]*\)', '', text)   # \move(x1,y1,x2,y2,...)
+    text = re.sub(r'\\an\d+', '', text)             # \anN 对齐
+    text = re.sub(r'\\a\d+', '', text)              # \aN 旧对齐
+    text = re.sub(r'\\fad\([^)]*\)', '', text)    # \fad 淡入淡出
+    text = re.sub(r'\\fade\([^)]*\)', '', text)   # \fade 复杂淡入淡出
+    text = re.sub(r'\\[kK][ofp]?\d*', '', text)    # \k \ko \kf 卡拉OK
+    text = re.sub(r'\\be\d*', '', text)             # \be 边缘模糊
+    text = re.sub(r'\\blur\d+(?:\.\d+)?', '', text)  # \blur
+    text = re.sub(r'\\bord\d+(?:\.\d+)?', '', text)  # \bord 描边
+    text = re.sub(r'\\shad\d+(?:\.\d+)?', '', text)  # \shad 阴影
+    text = re.sub(r'\\fsp\d+(?:\.\d+)?', '', text)   # \fsp 字间距
+    text = re.sub(r'\\fr[xz]?\-?\d*(?:\.\d+)?', '', text)  # \frx \fry \frz 旋转
+    text = re.sub(r'\\[xy]bor\d+(?:\.\d+)?', '', text)  # \xbord \ybord
+    text = re.sub(r'\\[xy]shad\d+(?:\.\d+)?', '', text)  # \xshad \yshad
+    text = re.sub(r'\\[1-4]a?&H[0-9A-Fa-f]+&', '', text)  # \c \1c \2c \3c \4c 颜色
+    text = re.sub(r'\\alpha&H[0-9A-Fa-f]+&', '', text)    # \alpha 透明度
+    text = re.sub(r'\\clip\([^)]*\)', '', text)   # \clip 裁剪
+    text = re.sub(r'\\iclip\([^)]*\)', '', text)  # \iclip 反裁剪
+    text = re.sub(r'\\t\([^)]*\)', '', text)      # \t 动画
+    text = re.sub(r'\\fax\-?\d+(?:\.\d+)?', '', text)  # \fax 倾斜
+    text = re.sub(r'\\fay\-?\d+(?:\.\d+)?', '', text)  # \fay 倾斜
+    text = re.sub(r'\\scx?\-?\d+(?:\.\d+)?', '', text)  # \scx \scy 缩放
+    text = re.sub(r'\\fn[^\\]+', '', text)         # \fn字体名
+    text = re.sub(r'\\fs\d+(?:\.\d+)?', '', text)   # \fs 字号
+    text = re.sub(r'\\b\d*', '', text)              # \b 粗体
+    text = re.sub(r'\\i\d*', '', text)              # \i 斜体
+    text = re.sub(r'\\u\d*', '', text)              # \u 下划线
+    text = re.sub(r'\\s\d*', '', text)              # \s 删除线
     text = re.sub(r'\\[xy][\dabcdefABCDEF]{4}', '', text)  # \xNNNN 彩色字符
 
-    # ── 去除音符和特殊符号 ──
-    text = text.replace('♪', '').replace('♫', '')
-    text = text.replace('♩', '').replace('♬', '')
+    # 7. 去除音乐/音效符号
+    for ch in ('♪', '♫', '♩', '♬', '∞'):
+        text = text.replace(ch, '')
 
-    # ── 去除全角空格 ──
-    text = text.replace('\u3000', ' ')
+    # 8. 去除特殊空白字符
+    text = text.replace('\u3000', ' ')  # 全角空格
+    text = re.sub(r'[\ufeff\u200b\u200c\u200d]', '', text)  # BOM, 零宽字符
 
-    # ── 合并多余空格和换行 ──
+    # 9. 去除行首行尾多余空白
+    text = re.sub(r'^\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+$', '', text, flags=re.MULTILINE)
+
+    # 10. 合并多个空格为一个
     text = re.sub(r' {2,}', ' ', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
 
-    # ── 去除首尾空白 ──
+    # 11. 合并被清洗产生的连续空行
+    text = re.sub(r'\n{3,}', '\n', text)
+
+    # 12. 去除首尾空白
     text = text.strip()
 
     return text
@@ -71,36 +117,7 @@ def clean_subtitle_file(subtitle) -> object:
     for entry in subtitle.entries:
         entry.text = clean_subtitle_entry(entry.text)
 
-    # ── 2. 去除纯空行条目 ──
-    subtitle.entries = [
-        e for e in subtitle.entries
-        if e.text.strip() != ''
-    ]
-
-    # ── 3. 合并相邻重复文本行 ──
-    if len(subtitle.entries) > 1:
-        merged = []
-        for entry in subtitle.entries:
-            if merged and entry.text == merged[-1].text and entry.text.strip():
-                # 文本相同且非空：扩展上一条的结束时间
-                merged[-1].end_time = entry.end_time
-            else:
-                merged.append(entry)
-        subtitle.entries = merged
-
-    # ── 4. 去除过短的噪声条目（纯标点/单个符号不算有效内容） ──
-    def _is_noise(text):
-        t = text.strip()
-        if not t:
-            return True
-        # 纯标点/符号
-        if re.match(r'^[\s\.\,\;\:\!\?\-\_\=\+\*\&\^\%\$\#\@\~\`\|\\\/\<\>\(\)\[\]\{\}\'"\"\u3000-\u303F\uFF00-\uFFEF]+$', t):
-            return True
-        return False
-
-    subtitle.entries = [e for e in subtitle.entries if not _is_noise(e.text)]
-
-    # ── 5. 按开始时间排序 ──
+    # ── 辅助函数：时间戳 → 毫秒（复用于合并/排序/去重） ──
     def _time_to_ms(entry):
         try:
             ts = entry.start_time.strip()
@@ -119,6 +136,60 @@ def clean_subtitle_file(subtitle) -> object:
             pass
         return 0
 
+    def _end_to_ms(entry):
+        try:
+            ts = entry.end_time.strip()
+            ts = ts.replace(',', '.')
+            m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})\.(\d{1,3})$', ts)
+            if m:
+                h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                frac = m.group(4)
+                if len(frac) == 2:
+                    frac = frac + '0'
+                elif len(frac) == 1:
+                    frac = frac + '00'
+                ms = int(frac[:3])
+                return h * 3600000 + mi * 60000 + s * 1000 + ms
+        except Exception:
+            pass
+        return 0
+
+    # ── 2. 去除纯空行条目 ──
+    subtitle.entries = [
+        e for e in subtitle.entries
+        if e.text.strip() != ''
+    ]
+
+    # ── 3. 合并相邻重复文本行（仅合并时间间隔 < 500ms 的同文本条目） ──
+    if len(subtitle.entries) > 1:
+        merged = []
+        for entry in subtitle.entries:
+            if merged and entry.text == merged[-1].text and entry.text.strip():
+                # 检查时间间隔，只有间隔很短的相邻同文本才合并
+                try:
+                    prev_end_ms = _end_to_ms(merged[-1])
+                    curr_start_ms = _time_to_ms(entry)
+                    if curr_start_ms - prev_end_ms <= 500:
+                        merged[-1].end_time = entry.end_time
+                        continue
+                except Exception:
+                    pass
+            merged.append(entry)
+        subtitle.entries = merged
+
+    # ── 4. 去除过短的噪声条目（纯标点/单个符号不算有效内容） ──
+    def _is_noise(text):
+        t = text.strip()
+        if not t:
+            return True
+        # 纯标点/符号
+        if re.match(r'^[\s\.\,\;\:\!\?\-\_\=\+\*\&\^\%\$\#\@\~\`\|\\\/\<\>\(\)\[\]\{\}\'"\"\u3000-\u303F\uFF00-\uFFEF]+$', t):
+            return True
+        return False
+
+    subtitle.entries = [e for e in subtitle.entries if not _is_noise(e.text)]
+
+    # ── 5. 按开始时间排序 ──
     subtitle.entries.sort(key=_time_to_ms)
 
     # ── 6. 去除时间重叠 ──
@@ -791,36 +862,26 @@ def format_subtitle_for_translation(subtitle):
 
 
 def parse_subtitle_translation_response(response_text, expected_count):
-    """解析 AI 翻译结果，兼容 [1] [01] [001] 等多种编号格式。"""
+    """解析 AI 翻译结果，去除所有可能的序号前缀"""
     translations = []
-
-    # 方法1: 匹配 [序号] 译文（兼容 1-4 位数字）
-    pattern = re.compile(r"\[(\d{1,4})\]\s*(.+)")
-    matches = pattern.findall(response_text)
-    if matches and len(matches) >= expected_count * 0.5:
-        ordered = sorted(matches, key=lambda x: int(x[0]))
-        translations = [m[1].strip() for m in ordered]
-        while len(translations) < expected_count:
-            translations.append("")
-        return translations[:expected_count]
-
-    # 方法2: 直接按行分割
-    lines = [l.strip() for l in response_text.strip().split("\n") if l.strip()]
-    if len(lines) >= expected_count * 0.5:
-        # 行首有编号残留的话先清理
-        cleaned = [re.sub(r"^\s*\[\d{1,4}\]\s*", "", l) for l in lines]
-        return cleaned[:expected_count]
-
-    # 方法3: 去除序号前缀后匹配（兜底）
-    cleaned_lines = []
     for line in response_text.strip().split("\n"):
-        line = re.sub(r"^\s*\[\d+\]\s*", "", line).strip()
+        line = line.strip()
+        if not line:
+            continue
+        # 统一去除行首的序号前缀格式：
+        # [001], [1], 1., 1), 1、, 1）, 1：, 1:, 第1条：, 第1条: 等
+        line = re.sub(
+            r'^\s*(?:\[\d+\]\s*|\d+[\.、)）\]\uff1a:：]+\s*|\u7b2c\s*\d+\s*\u6761\s*[\uff1a:：]?\s*)',
+            '', line
+        )
+        line = line.strip()
         if line:
-            cleaned_lines.append(line)
-    if len(cleaned_lines) >= expected_count * 0.5:
-        return cleaned_lines[:expected_count]
+            translations.append(line)
 
-    return translations if translations else lines
+    # 补充或截断到期望数量
+    while len(translations) < expected_count:
+        translations.append("")
+    return translations[:expected_count]
 
 
 # ═══════════════════════════════════════════════════════════
