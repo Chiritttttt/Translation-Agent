@@ -683,6 +683,9 @@ def split_chunks(text, max_chars=8000):
 # 五步翻译工作流
 # ═══════════════════════════════════════════════════════════
 def step1_analyze(text, source_lang, target_lang, audience, style):
+    """深度分析源文本，长文档分段分析后合并术语，确保覆盖完整文档。"""
+    ANALYSIS_CHUNK = 6000
+
     sys_prompt = """你是专业翻译前置分析师。
 输出严格按照以下固定Markdown结构：
 ## 概要
@@ -696,16 +699,51 @@ def step1_analyze(text, source_lang, target_lang, audience, style):
 ## 读者理解难点 & 文化注解点
 ## 修辞隐喻与替换映射
 """
-    user_prompt = f"""
+
+    if len(text) <= ANALYSIS_CHUNK:
+        # 短文档：一次分析
+        user_prompt = f"""
 源语言：{source_lang}
 目标语言：{target_lang}
 目标读者：{audience or "普通读者"}
 风格模式：{style or "auto"}
 
 原文：
-{text[:4000]}
+{text}
 """
-    return chat(sys_prompt, user_prompt, temperature=0.2)
+        return chat(sys_prompt, user_prompt, temperature=0.2)
+
+    # ── 长文档：分段分析 ──
+    # 第一段：完整分析（概要 + 术语 + 风格 + 难点 + 修辞）
+    chunks = [text[i:i+ANALYSIS_CHUNK] for i in range(0, len(text), ANALYSIS_CHUNK)]
+    user_prompt = f"""
+源语言：{source_lang}
+目标语言：{target_lang}
+目标读者：{audience or "普通读者"}
+风格模式：{style or "auto"}
+这是长文档的第 1/{len(chunks)} 段，请进行完整分析。
+
+原文：
+{chunks[0]}
+"""
+    full_analysis = chat(sys_prompt, user_prompt, temperature=0.2)
+
+    # 后续段：只提取术语（避免重复生成概要/风格）
+    term_prompt = """你是术语提取专家。从以下文本中提取所有专业术语、缩写、惯用表达、专有名词。
+只输出术语列表，格式：- 原文 → 译文
+不要输出其他内容。"""
+
+    for idx in range(1, len(chunks)):
+        chunk_terms = chat(
+            term_prompt,
+            f"源语言：{source_lang}，目标语言：{target_lang}\n\n原文：\n{chunks[idx]}",
+            temperature=0.1
+        )
+        # 将术语追加到分析报告的术语表部分
+        if chunk_terms.strip():
+            full_analysis += f"\n\n### 第 {idx+1}/{len(chunks)} 段补充术语\n{chunk_terms.strip()}"
+
+    return full_analysis
 
 
 def step2_build_prompt(analysis, source_lang, target_lang, audience, style):
@@ -852,6 +890,9 @@ class SubtitleWorker(QThread):
 
     # ── 第一步：AI 分析字幕内容 ──
     def _step_analyze(self, source_text):
+        """分段分析字幕内容，长字幕确保覆盖完整。"""
+        ANALYSIS_CHUNK = 8000
+
         sys_prompt = """你是专业翻译前置分析师，当前任务是对字幕文本进行分析。
 字幕文本每行是一条字幕，格式如 [001] Hello world。
 输出严格按照以下固定Markdown结构：
@@ -865,7 +906,10 @@ class SubtitleWorker(QThread):
 ## 读者理解难点 & 文化注解点
 ## 修辞隐喻与替换映射
 """
-        user_prompt = f"""
+
+        if len(source_text) <= ANALYSIS_CHUNK:
+            # 短字幕：一次分析
+            user_prompt = f"""
 源语言：{self.source_lang}
 目标语言：{self.target_lang}
 目标读者：{self.audience or "普通观众"}
@@ -873,9 +917,44 @@ class SubtitleWorker(QThread):
 这是字幕文件，每行代表一条字幕，请基于字幕文本内容进行分析。
 
 原文：
-{source_text[:8000]}
+{source_text}
 """
-        return chat(sys_prompt, user_prompt, temperature=0.2)
+            return chat(sys_prompt, user_prompt, temperature=0.2)
+
+        # ── 长字幕：分段分析 ──
+        chunks = [source_text[i:i+ANALYSIS_CHUNK] for i in range(0, len(source_text), ANALYSIS_CHUNK)]
+
+        # 第一段：完整分析
+        user_prompt = f"""
+源语言：{self.source_lang}
+目标语言：{self.target_lang}
+目标读者：{self.audience or "普通观众"}
+风格模式：{self.style or "auto"}
+这是字幕文件，每行代表一条字幕。
+这是长字幕的第 1/{len(chunks)} 段，请进行完整分析。
+
+原文：
+{chunks[0]}
+"""
+        full_analysis = chat(sys_prompt, user_prompt, temperature=0.2)
+
+        # 后续段：只提取术语
+        term_prompt = """你是术语提取专家。从以下字幕文本中提取所有专业术语、缩写、惯用表达、专有名词。
+只输出术语列表，格式：- 原文 → 译文
+不要输出其他内容。"""
+
+        for idx in range(1, len(chunks)):
+            self.progress.emit(
+                f"分析字幕内容 {idx+1}/{len(chunks)}...", 1)
+            chunk_terms = chat(
+                term_prompt,
+                f"源语言：{self.source_lang}，目标语言：{self.target_lang}\n\n原文：\n{chunks[idx]}",
+                temperature=0.1
+            )
+            if chunk_terms.strip():
+                full_analysis += f"\n\n### 第 {idx+1}/{len(chunks)} 段补充术语\n{chunk_terms.strip()}"
+
+        return full_analysis
 
     # ── 第二步：组装翻译提示 ──
     def _step_build_prompt(self, analysis):
