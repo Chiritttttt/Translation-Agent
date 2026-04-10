@@ -328,6 +328,39 @@ def get_all_lang_pairs():
 
 # ─── 删除 / 编辑 ─────────────────────────────────────────
 
+def edit_term(source_lang, target_lang, source_text, new_target=None, new_source=None, new_category=None):
+    """编辑指定术语。
+
+    Args:
+        source_lang / target_lang: 语言对
+        source_text: 原术语的原文（用于定位）
+        new_target: 新译文（None 则不修改）
+        new_source: 新原文（None 则不修改）
+        new_category: 新分类（None 则不修改）
+
+    Returns:
+        bool: 是否修改成功
+    """
+    data = load_glossary()
+    key = _pair_key(source_lang, target_lang)
+
+    if key not in data["lang_pairs"]:
+        return False
+
+    source_clean = source_text.strip().lower()
+    for t in data["lang_pairs"][key]["terms"]:
+        if t["source"].strip().lower() == source_clean:
+            if new_target is not None and new_target.strip():
+                t["target"] = new_target.strip()
+            if new_source is not None and new_source.strip():
+                t["source"] = new_source.strip()
+            if new_category is not None and new_category.strip():
+                t["category"] = new_category.strip()
+            save_glossary(data)
+            return True
+    return False
+
+
 def delete_term(source_lang, target_lang, source_text):
     """删除指定术语。
 

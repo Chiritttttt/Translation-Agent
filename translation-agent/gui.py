@@ -2331,12 +2331,18 @@ class MainWindow(QMainWindow):
     # 术语库管理器
     # ═══════════════════════════════════════════════════════════
     def open_glossary_manager(self):
-        from glossary import get_terms, add_term, delete_term, clear_glossary, import_glossary_from_text
+        from glossary import (
+            get_terms, add_term, edit_term, delete_term,
+            clear_glossary, import_glossary_from_text, get_all_lang_pairs,
+        )
         C = ArcoColors
 
         dlg = QDialog(self)
         dlg.setWindowTitle("术语库管理")
-        dlg.setMinimumSize(700, 500)
+        dlg.setMinimumSize(780, 600)
+        dlg.resize(820, 650)
+
+        # ── 全局样式 ──
         dlg.setStyleSheet(f"""
             QDialog {{
                 background-color: {C.BG_PAGE};
@@ -2348,9 +2354,77 @@ class MainWindow(QMainWindow):
             }}
             QLineEdit {{
                 color: {C.TEXT_PRIMARY};
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_SM};
+                padding: 0 8px;
+                font-size: 13px;
+            }}
+            QLineEdit:focus {{
+                border-color: {C.PRIMARY};
             }}
             QPushButton {{
                 color: {C.TEXT_PRIMARY};
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_SM};
+                padding: 6px 16px;
+                font-size: 13px;
+            }}
+            QPushButton:hover {{
+                border-color: {C.PRIMARY};
+                color: {C.PRIMARY};
+            }}
+            QPushButton:pressed {{
+                background: {C.PRIMARY_LIGHT};
+            }}
+            QTableWidget {{
+                background-color: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+                gridline-color: {C.BORDER_LIGHT};
+                font-size: 13px;
+                selection-background-color: {C.PRIMARY_LIGHT};
+                selection-color: {C.TEXT_PRIMARY};
+                alternate-background-color: {C.FILL1};
+            }}
+            QTableWidget::item {{
+                padding: 6px 8px;
+                border-bottom: 1px solid {C.BORDER_LIGHT};
+            }}
+            QTableWidget::item:hover {{
+                background-color: {C.PRIMARY_LIGHT2};
+            }}
+            QHeaderView::section {{
+                background-color: {C.FILL2};
+                color: {C.TEXT_REGULAR};
+                border: none;
+                border-bottom: 2px solid {C.BORDER};
+                border-right: 1px solid {C.BORDER_LIGHT};
+                padding: 8px 6px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QComboBox {{
+                color: {C.TEXT_PRIMARY};
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_SM};
+                padding: 4px 8px;
+                min-height: 30px;
+                font-size: 13px;
+            }}
+            QComboBox:focus {{
+                border-color: {C.PRIMARY};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 24px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER};
+                selection-background-color: {C.PRIMARY_LIGHT};
             }}
         """)
 
@@ -2358,125 +2432,171 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(12)
         main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # 标题
+        # ── 标题行 ──
+        title_row = QHBoxLayout()
         title = QLabel("术语库管理")
         title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 16, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; background: transparent;")
-        main_layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
 
-        # 语言对信息
+        # 语言对下拉框
         source_lang = self._get_source_lang()
         target_lang = self._get_target_lang()
-        pair_lbl = QLabel(f"当前语言对：{source_lang} → {target_lang}")
-        pair_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent;")
-        main_layout.addWidget(pair_lbl)
+        pair_lbl = QLabel("语言对：")
+        pair_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; background: transparent; font-size: 13px;")
+        title_row.addWidget(pair_lbl)
 
-        # 添加术语区
+        lang_pairs = get_all_lang_pairs()
+        pair_combo = QComboBox()
+        pair_combo.setMinimumWidth(200)
+        # 当前语言对放在第一个
+        current_key = f"{source_lang.lower()[:2]}→{target_lang.lower()[:2]}"
+        pair_items = []
+        # 找到当前语言对的全名 key
+        current_display = f"{source_lang} → {target_lang}"
+        pair_items.append((current_display, source_lang, target_lang))
+        for lp in lang_pairs:
+            key = lp.get("key", "")
+            sl = lp.get("source_lang", "")
+            tl = lp.get("target_lang", "")
+            if f"{sl.lower()[:2]}→{tl.lower()[:2]}" != current_key:
+                pair_items.append((f"{sl} → {tl}  ({lp.get('count', 0)} 条)", sl, tl))
+        pair_combo.addItems([p[0] for p in pair_items])
+        title_row.addWidget(pair_combo)
+
+        main_layout.addLayout(title_row)
+
+        # 术语计数
+        count_lbl = QLabel("")
+        count_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; background: transparent; font-size: 12px;")
+        main_layout.addWidget(count_lbl)
+
+        # ── 搜索栏 ──
+        search_frame = QFrame()
+        search_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+            }}
+        """)
+        search_layout = QHBoxLayout(search_frame)
+        search_layout.setContentsMargins(10, 6, 10, 6)
+        search_layout.setSpacing(8)
+        search_icon = QLabel("🔍")
+        search_icon.setStyleSheet("background: transparent; font-size: 14px;")
+        search_layout.addWidget(search_icon)
+        search_le = QLineEdit()
+        search_le.setPlaceholderText("搜索术语（原文或译文）...")
+        search_le.setFrame(False)  # 去掉默认边框
+        search_le.setFixedHeight(30)
+        search_layout.addWidget(search_le)
+        main_layout.addWidget(search_frame)
+
+        # ── 添加术语区 ──
         add_frame = QFrame()
         add_frame.setStyleSheet(f"""
             QFrame {{
                 background: {C.BG_CARD};
                 border: 1px solid {C.BORDER_LIGHT};
                 border-radius: {C.RADIUS_MD};
-                padding: 12px;
             }}
         """)
         add_layout = QHBoxLayout(add_frame)
-        add_layout.setContentsMargins(12, 12, 12, 12)
+        add_layout.setContentsMargins(12, 10, 12, 10)
         add_layout.setSpacing(8)
 
-        add_layout.addWidget(QLabel("原文"))
+        src_label = QLabel("原文")
+        src_label.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent;")
         src_le = QLineEdit()
-        src_le.setPlaceholderText("原文术语")
+        src_le.setPlaceholderText("输入原文术语")
         src_le.setFixedHeight(34)
-        add_layout.addWidget(src_le)
-        add_layout.addWidget(QLabel("译文"))
+        add_layout.addWidget(src_label)
+        add_layout.addWidget(src_le, stretch=3)
+
+        arrow_lbl = QLabel("→")
+        arrow_lbl.setStyleSheet(f"color: {C.PRIMARY}; font-size: 16px; font-weight: bold; background: transparent;")
+        arrow_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        add_layout.addWidget(arrow_lbl)
+
+        tgt_label = QLabel("译文")
+        tgt_label.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent;")
         tgt_le = QLineEdit()
-        tgt_le.setPlaceholderText("目标语言术语")
+        tgt_le.setPlaceholderText("输入译文")
         tgt_le.setFixedHeight(34)
-        add_layout.addWidget(tgt_le)
+        add_layout.addWidget(tgt_label)
+        add_layout.addWidget(tgt_le, stretch=3)
+
         cat_le = QLineEdit()
-        cat_le.setPlaceholderText("分类（可选）")
-        cat_le.setFixedWidth(100)
+        cat_le.setPlaceholderText("分类")
+        cat_le.setFixedWidth(80)
         cat_le.setFixedHeight(34)
         add_layout.addWidget(cat_le)
 
-        def do_add():
-            s = src_le.text().strip()
-            t = tgt_le.text().strip()
-            c = cat_le.text().strip() or "通用"
-            if s and t:
-                add_term(s, t, source_lang, target_lang, category=c)
-                src_le.clear()
-                tgt_le.clear()
-                cat_le.clear()
-                refresh_table()
-
-        add_btn = QPushButton("添加")
+        add_btn = QPushButton("＋ 添加")
         add_btn.setFixedHeight(34)
+        add_btn.setMinimumWidth(70)
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.clicked.connect(do_add)
+        add_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PRIMARY};
+                color: white;
+                border: none;
+                border-radius: {C.RADIUS_SM};
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {C.PRIMARY_HOVER};
+                color: white;
+                border: none;
+            }}
+            QPushButton:pressed {{
+                background: {C.PRIMARY_ACTIVE};
+                color: white;
+                border: none;
+            }}
+        """)
         add_layout.addWidget(add_btn)
         main_layout.addWidget(add_frame)
 
-        # 术语表格
-        table = QTableWidget(0, 3)
-        table.setHorizontalHeaderLabels(["原文", "译文", "分类"])
+        # ── 术语表格 ──
+        table = QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["原文", "译文", "分类", "添加时间"])
         table.horizontalHeader().setStretchLastSection(True)
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(2, 80)
+        table.setColumnWidth(3, 110)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(False)
         main_layout.addWidget(table)
 
-        def refresh_table():
-            terms = get_terms(source_lang, target_lang)
-            table.setRowCount(len(terms))
-            for i, t in enumerate(terms):
-                table.setItem(i, 0, QTableWidgetItem(t.get("source", "")))
-                table.setItem(i, 1, QTableWidgetItem(t.get("target", "")))
-                table.setItem(i, 2, QTableWidgetItem(t.get("category", "")))
+        # ── 状态栏 + 提示 ──
+        hint_lbl = QLabel("💡 双击表格行可编辑术语")
+        hint_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 11px; background: transparent;")
+        main_layout.addWidget(hint_lbl)
 
-        def do_delete():
-            rows = set(i.row() for i in table.selectedItems())
-            if not rows:
-                QMessageBox.warning(dlg, "提示", "请先选择要删除的术语。")
-                return
-            terms = get_terms(source_lang, target_lang)
-            for row in sorted(rows, reverse=True):
-                if row < len(terms):
-                    t = terms[row]
-                    delete_term(t.get("source", ""), t.get("target", ""), source_lang, target_lang)
-            refresh_table()
-
-        def do_clear():
-            ret = QMessageBox.question(dlg, "确认", "确定要清空当前语言对的所有术语吗？",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if ret == QMessageBox.StandardButton.Yes:
-                clear_glossary(source_lang, target_lang)
-                refresh_table()
-
-        def do_import():
-            path, _ = QFileDialog.getOpenFileName(dlg, "导入术语", "", "文本文件 (*.txt)")
-            if path:
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    count = import_glossary_from_text(content, source_lang, target_lang)
-                    refresh_table()
-                    QMessageBox.information(dlg, "完成", f"已导入 {count} 条术语。")
-                except Exception as e:
-                    QMessageBox.critical(dlg, "错误", f"导入失败：{str(e)}")
-
-        # 底部按钮
+        # ── 底部按钮 ──
         btn_row = QHBoxLayout()
         btn_row.addStretch()
-        for text, handler in [("导入术语", do_import), ("删除选中", do_delete), ("清空全部", do_clear)]:
+        btn_configs = [
+            ("📥 导入术语", do_import := lambda: None),  # placeholder
+            ("✏️ 编辑选中", do_edit := lambda: None),
+            ("🗑️ 删除选中", do_delete := lambda: None),
+            ("清空全部", do_clear := lambda: None),
+        ]
+        action_btns = {}
+        for text, _ in btn_configs:
             b = QPushButton(text)
             b.setFixedHeight(34)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(handler)
+            action_btns[text] = b
             btn_row.addWidget(b)
         close_btn = QPushButton("关闭")
         close_btn.setFixedHeight(34)
@@ -2485,6 +2605,202 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(close_btn)
         main_layout.addLayout(btn_row)
 
+        # ── 数据与逻辑 ──
+        def get_current_langs():
+            """获取当前选择的语言对"""
+            idx = pair_combo.currentIndex()
+            if 0 <= idx < len(pair_items):
+                return pair_items[idx][1], pair_items[idx][2]
+            return source_lang, target_lang
+
+        def refresh_table(search_text=""):
+            sl, tl = get_current_langs()
+            terms = get_terms(sl, tl)
+            # 搜索过滤
+            if search_text.strip():
+                kw = search_text.strip().lower()
+                terms = [t for t in terms
+                         if kw in t.get("source", "").lower()
+                         or kw in t.get("target", "").lower()
+                         or kw in t.get("category", "").lower()]
+            table.setRowCount(len(terms))
+            for i, t in enumerate(terms):
+                table.setItem(i, 0, QTableWidgetItem(t.get("source", "")))
+                table.setItem(i, 1, QTableWidgetItem(t.get("target", "")))
+                table.setItem(i, 2, QTableWidgetItem(t.get("category", "")))
+                table.setItem(i, 3, QTableWidgetItem(t.get("added_at", "")))
+            count_lbl.setText(f"共 {len(terms)} 条术语")
+
+        def do_add_term():
+            sl, tl = get_current_langs()
+            s = src_le.text().strip()
+            t = tgt_le.text().strip()
+            c = cat_le.text().strip() or "通用"
+            if not s or not t:
+                QMessageBox.warning(dlg, "提示", "请输入原文和译文。")
+                return
+            result = add_term(s, t, sl, tl, category=c)
+            if result:
+                src_le.clear(); tgt_le.clear(); cat_le.clear()
+                src_le.setFocus()
+                refresh_table(search_le.text())
+            else:
+                QMessageBox.information(dlg, "提示",
+                    f"术语 \"{s}\" 已存在。\n如需修改，请双击该术语或选中后点击编辑按钮。")
+
+        def do_edit_term():
+            sl, tl = get_current_langs()
+            rows = set(i.row() for i in table.selectedItems())
+            if not rows:
+                QMessageBox.warning(dlg, "提示", "请先选择要编辑的术语。")
+                return
+            terms = get_terms(sl, tl)
+            kw = search_le.text().strip().lower()
+            if kw:
+                terms = [t for t in terms
+                         if kw in t.get("source", "").lower()
+                         or kw in t.get("target", "").lower()]
+            row = min(rows)
+            if row >= len(terms):
+                return
+            t = terms[row]
+            # 弹出编辑对话框
+            edit_dlg = QDialog(dlg)
+            edit_dlg.setWindowTitle("编辑术语")
+            edit_dlg.setFixedSize(420, 200)
+            edit_dlg.setStyleSheet(dlg.styleSheet())
+            edit_layout = QVBoxLayout(edit_dlg)
+            edit_layout.setSpacing(10)
+            edit_layout.setContentsMargins(20, 20, 20, 20)
+
+            edit_title = QLabel("编辑术语")
+            edit_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 14, QFont.Weight.Bold))
+            edit_layout.addWidget(edit_title)
+
+            form = QGridLayout()
+            form.setSpacing(8)
+            for col, (label_text, default_val) in enumerate([
+                ("原文：", t.get("source", "")),
+                ("译文：", t.get("target", "")),
+                ("分类：", t.get("category", "")),
+            ]):
+                lbl = QLabel(label_text)
+                lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; background: transparent;")
+                le = QLineEdit(default_val)
+                le.setFixedHeight(32)
+                form.addWidget(lbl, col, 0)
+                form.addWidget(le, col, 1)
+            edit_layout.addLayout(form)
+
+            btn_row2 = QHBoxLayout()
+            btn_row2.addStretch()
+            save_btn = QPushButton("保存")
+            save_btn.setFixedHeight(32)
+            save_btn.setMinimumWidth(80)
+            save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            save_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C.PRIMARY}; color: white; border: none;
+                    border-radius: {C.RADIUS_SM}; font-weight: 600;
+                }}
+                QPushButton:hover {{ background: {C.PRIMARY_HOVER}; color: white; border: none; }}
+            """)
+            cancel_btn = QPushButton("取消")
+            cancel_btn.setFixedHeight(32)
+            cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_row2.addWidget(save_btn)
+            btn_row2.addWidget(cancel_btn)
+            edit_layout.addLayout(btn_row2)
+
+            inputs = [form.itemAt(r, 1).widget() for r in range(3)]
+
+            def do_save():
+                new_src = inputs[0].text().strip()
+                new_tgt = inputs[1].text().strip()
+                new_cat = inputs[2].text().strip()
+                if not new_src or not new_tgt:
+                    QMessageBox.warning(edit_dlg, "提示", "原文和译文不能为空。")
+                    return
+                ok = edit_term(sl, tl, t.get("source", ""),
+                               new_target=new_tgt,
+                               new_source=new_src,
+                               new_category=new_cat)
+                if ok:
+                    edit_dlg.accept()
+                    refresh_table(search_le.text())
+                else:
+                    QMessageBox.warning(edit_dlg, "失败", "编辑失败，术语可能已被删除。")
+
+            save_btn.clicked.connect(do_save)
+            cancel_btn.clicked.connect(edit_dlg.reject)
+            edit_dlg.exec()
+
+        def do_delete_terms():
+            sl, tl = get_current_langs()
+            rows = set(i.row() for i in table.selectedItems())
+            if not rows:
+                QMessageBox.warning(dlg, "提示", "请先选择要删除的术语。")
+                return
+            terms = get_terms(sl, tl)
+            kw = search_le.text().strip().lower()
+            if kw:
+                terms = [t for t in terms
+                         if kw in t.get("source", "").lower()
+                         or kw in t.get("target", "").lower()]
+            deleted = 0
+            for row in sorted(rows, reverse=True):
+                if row < len(terms):
+                    t = terms[row]
+                    if delete_term(sl, tl, t.get("source", "")):
+                        deleted += 1
+            refresh_table(search_le.text())
+
+        def do_clear_all():
+            sl, tl = get_current_langs()
+            ret = QMessageBox.question(dlg, "确认",
+                                       f"确定要清空 {sl} → {tl} 的所有术语吗？\n此操作不可撤销。",
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                clear_glossary(sl, tl)
+                refresh_table(search_le.text())
+
+        def do_import_terms():
+            sl, tl = get_current_langs()
+            path, _ = QFileDialog.getOpenFileName(dlg, "导入术语", "", "文本文件 (*.txt)")
+            if path:
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    added, total = import_glossary_from_text(content, sl, tl)
+                    refresh_table(search_le.text())
+                    QMessageBox.information(dlg, "完成",
+                                            f"导入完成：共 {total} 条，新增 {added} 条，跳过 {total - added} 条。")
+                except Exception as e:
+                    QMessageBox.critical(dlg, "错误", f"导入失败：{str(e)}")
+
+        # 双击编辑
+        def on_double_click(row, _col):
+            table.selectRow(row)
+            do_edit_term()
+
+        # 连接信号
+        add_btn.clicked.connect(do_add_term)
+        action_btns["✏️ 编辑选中"].clicked.connect(do_edit_term)
+        action_btns["🗑️ 删除选中"].clicked.connect(do_delete_terms)
+        action_btns["清空全部"].clicked.connect(do_clear_all)
+        action_btns["📥 导入术语"].clicked.connect(do_import_terms)
+        table.cellDoubleClicked.connect(on_double_click)
+        pair_combo.currentIndexChanged.connect(lambda: refresh_table(search_le.text()))
+        search_le.textChanged.connect(refresh_table)
+
+        # Enter 键添加
+        def on_enter():
+            do_add_term()
+        tgt_le.returnPressed.connect(on_enter)
+        cat_le.returnPressed.connect(on_enter)
+        src_le.returnPressed.connect(lambda: tgt_le.setFocus())
+
+        # 初始加载
         refresh_table()
         dlg.exec()
 
