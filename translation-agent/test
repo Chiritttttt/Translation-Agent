@@ -1,0 +1,17 @@
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+print("API KEY:", os.getenv("OPENAI_API_KEY"))
+print("BASE URL:", os.getenv("OPENAI_BASE_URL"))
+print("MODEL:", os.getenv("OPENAI_MODEL"))
+
+import translation_agent as ta
+
+result = ta.translate(
+    source_lang="English",
+    target_lang="Chinese",
+    source_text="The quick brown fox jumps over the lazy dog.",
+    country="China"
+)
+print(result)

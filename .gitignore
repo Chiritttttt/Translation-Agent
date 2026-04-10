@@ -1,0 +1,13 @@
+﻿.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+
+.env
+translation-agent/.env
+translation-agent/__pycache__/
+translation-agent/build/
+translation-agent/dist/
