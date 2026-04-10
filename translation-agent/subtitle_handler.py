@@ -1018,6 +1018,55 @@ def generate_subtitle_output_name(original_path, mode="bilingual",
 
     return f"{basename}-{lang_suffix}-agent{mode_str}{ext}"
 # ═══════════════════════════════════════════════════════════
+# 字幕文本输出（预览用）
+# ═══════════════════════════════════════════════════════════
+
+def subtitle_to_text(subtitle, include_index=True, include_time=True):
+    """
+    将字幕对象格式化为可读文本，用于 GUI 预览。
+
+    Args:
+        subtitle: SubtitleFile 对象
+        include_index: 是否包含序号
+        include_time: 是否包含时间轴
+
+    Returns:
+        格式化后的文本字符串
+    """
+    lines = []
+    for e in subtitle.entries:
+        header_parts = []
+        if include_index:
+            header_parts.append(f"[{e.index:03d}]")
+        if include_time:
+            header_parts.append(f"{e.start_time} --> {e.end_time}")
+        if header_parts:
+            lines.append("  ".join(header_parts))
+        lines.append(f"    {e.text}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def subtitle_to_srt_string(subtitle):
+    """
+    将字幕对象输出为标准 SRT 格式字符串（与 export_srt_bilingual 相同逻辑，
+    但返回字符串而非写文件，用于预览）。
+
+    Returns:
+        SRT 格式的完整字符串
+    """
+    buf = []
+    for i, entry in enumerate(subtitle.entries):
+        start = _normalize_time_to_srt(entry.start_time, subtitle.format_type)
+        end = _normalize_time_to_srt(entry.end_time, subtitle.format_type)
+        buf.append(f"{i + 1}")
+        buf.append(f"{start} --> {end}")
+        buf.append(entry.text)
+        buf.append("")
+    return "\n".join(buf)
+
+
+# ═══════════════════════════════════════════════════════════
 # 兼容别名（供 gui.py 调用）
 # ═══════════════════════════════════════════════════════════
 parse_subtitle_file = read_subtitle_file

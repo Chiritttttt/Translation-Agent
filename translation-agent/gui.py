@@ -29,6 +29,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
 import openai
 import requests
+import re
 from bs4 import BeautifulSoup
 
 # 日志配置 — 打包后 console=False 也能写文件排查问题
@@ -1693,12 +1694,29 @@ class MainWindow(QMainWindow):
         mode_row.addStretch()
         sl_layout.addLayout(mode_row)
 
-        # 字幕预览
+        # 字幕预览（Tab 切换：内容预览 / 清洗后文件）
+        self.sub_preview_tabs = QTabWidget()
+        self.sub_preview_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+                background: {C.BG_CARD};
+                padding: 4px;
+            }}
+        """)
+        # Tab 1: 内容预览（可读格式）
         self.sub_preview = QTextEdit()
         self.sub_preview.setReadOnly(True)
-        self.sub_preview.setPlaceholderText("导入字幕文件后，此处显示预览...")
-        self.sub_preview.setMinimumHeight(120)
-        sl_layout.addWidget(self.sub_preview)
+        self.sub_preview.setPlaceholderText("导入字幕文件后，此处显示清洗后的预览...")
+        self.sub_preview_tabs.addTab(self.sub_preview, "  内容预览  ")
+        # Tab 2: 清洗后文件（SRT 格式原文）
+        self.sub_file_preview = QTextEdit()
+        self.sub_file_preview.setReadOnly(True)
+        self.sub_file_preview.setPlaceholderText("导入后此处显示清洗后的 SRT 文件内容...")
+        self.sub_file_preview.setStyleSheet("font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;")
+        self.sub_preview_tabs.addTab(self.sub_file_preview, "  清洗后文件  ")
+        self.sub_preview_tabs.setMinimumHeight(120)
+        sl_layout.addWidget(self.sub_preview_tabs)
 
         # 字幕操作按钮
         sub_action_row = QHBoxLayout()
@@ -2218,13 +2236,15 @@ class MainWindow(QMainWindow):
     def choose_subtitle_file(self):
         try:
             path, _ = QFileDialog.getOpenFileName(
-                filter="字幕文件 (*.srt *.vtt *.ass *.ssa)")
+                filter="字幕文件 (*.srt *.vtt *.ass *.ssa *.txt)")
             if not path:
                 return
 
             from subtitle_handler import (
                 parse_subtitle_file,
                 clean_subtitle_file,
+                subtitle_to_text,
+                subtitle_to_srt_string,
             )
 
             parsed = parse_subtitle_file(path)
@@ -2232,28 +2252,75 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "提示", "无法解析该字幕文件。")
                 return
 
+            # ── 记录清洗前条目数 ──
+            original_count = len(parsed.entries)
+            original_format = parsed.format_type.upper()
+
             # ── 自动清洗字幕 ──
             parsed = clean_subtitle_file(parsed)
 
+            cleaned_count = len(parsed.entries)
+            removed_count = original_count - cleaned_count
+
             self.subtitle_obj = parsed
             self.subtitle_path = path
-            self.sub_file_label.setText(f"已导入（已清洗）：{os.path.basename(path)} [{len(parsed.entries)} 条]")
             self.sub_translate_btn.setEnabled(True)
             self.sub_export_btn.setEnabled(False)
 
-            # 预览前 20 条
-            preview_lines = []
-            for e in parsed.entries[:20]:
-                preview_lines.append(f"[{e.index}] {e.start_time} --> {e.end_time}")
-                preview_lines.append(f"    {e.text}")
-                preview_lines.append("")
-            if len(parsed.entries) > 20:
-                preview_lines.append(f"... 共 {len(parsed.entries)} 条，仅显示前 20 条")
-            self.sub_preview.setPlainText("\n".join(preview_lines))
+            # ── 统计信息摘要 ──
+            total_chars = sum(len(e.text) for e in parsed.entries)
+            total_duration_ms = 0
+            for e in parsed.entries:
+                try:
+                    ts = e.end_time.strip().replace(',', '.')
+                    m = re.match(r'^(\d{1,2}):(\d{2}):(\d{2})\.(\d{1,3})$', ts)
+                    if m:
+                        h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                        frac = m.group(4)
+                        if len(frac) == 2: frac += '0'
+                        elif len(frac) == 1: frac += '00'
+                        total_duration_ms += h * 3600000 + mi * 60000 + s * 1000 + int(frac[:3])
+                except Exception:
+                    pass
+            duration_s = total_duration_ms // 1000
+            dur_h = duration_s // 3600
+            dur_m = (duration_s % 3600) // 60
+            dur_s = duration_s % 60
+            if dur_h > 0:
+                duration_str = f"{dur_h}时{dur_m}分{dur_s}秒"
+            elif dur_m > 0:
+                duration_str = f"{dur_m}分{dur_s}秒"
+            else:
+                duration_str = f"{dur_s}秒"
+
+            summary_parts = [f"格式: {original_format} → SRT", f"条目: {cleaned_count} 条"]
+            if removed_count > 0:
+                summary_parts.append(f"已清洗: 移除 {removed_count} 条噪声/空行")
+            summary_parts.append(f"总字数: {total_chars}")
+            summary_parts.append(f"时长: {duration_str}")
+            summary = "  |  ".join(summary_parts)
+
+            self.sub_file_label.setText(
+                f"已导入（已清洗）：{os.path.basename(path)}  [{summary}]")
+            self.sub_file_label.setToolTip(
+                f"原始格式: {original_format}\n原始条目: {original_count}\n清洗后条目: {cleaned_count}\n"
+                f"移除噪声: {removed_count} 条\n总字数: {total_chars}\n时长: {duration_str}")
+
+            # ── Tab 1: 内容预览（全部条目，可滚动） ──
+            preview_text = subtitle_to_text(parsed, include_index=True, include_time=True)
+            self.sub_preview.setPlainText(preview_text)
+
+            # ── Tab 2: 清洗后文件（标准 SRT 格式） ──
+            srt_content = subtitle_to_srt_string(parsed)
+            self.sub_file_preview.setPlainText(srt_content)
+
+            # 默认显示内容预览 Tab
+            self.sub_preview_tabs.setCurrentIndex(0)
 
             # 自动设置输出格式
             ext = path.lower().split(".")[-1]
-            fmt_map = {"srt": "SRT (.srt)", "vtt": "VTT (.vtt)", "ass": "ASS (.ass)", "ssa": "ASS (.ass)"}
+            fmt_map = {"srt": "SRT (.srt)", "vtt": "VTT (.vtt)", "ass": "ASS (.ass)",
+                       "ssa": "ASS (.ass)", "txt": "SRT (.srt)"}
             target_fmt = fmt_map.get(ext, "同原格式")
             idx = self.sub_fmt_combo.findText(target_fmt)
             if idx >= 0:
@@ -2334,17 +2401,29 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(True)
         self.result_tabs.setCurrentIndex(2)
 
-        # 更新字幕预览
+        # 更新字幕预览 — 全部条目，含译文
         preview_lines = []
-        for e in subtitle.entries[:20]:
-            preview_lines.append(f"[{e.index}] {e.start_time} --> {e.end_time}")
+        for e in subtitle.entries:
+            preview_lines.append(f"[{e.index:03d}]  {e.start_time} --> {e.end_time}")
             preview_lines.append(f"    {e.text}")
             if e.translated:
                 preview_lines.append(f"    → {e.translated}")
             preview_lines.append("")
-        if len(subtitle.entries) > 20:
-            preview_lines.append(f"... 共 {len(subtitle.entries)} 条")
         self.sub_preview.setPlainText("\n".join(preview_lines))
+
+        # 更新清洗后文件 Tab（双语 SRT 格式）
+        from subtitle_handler import subtitle_to_srt_string, _normalize_time_to_srt
+        srt_lines = []
+        for i, entry in enumerate(subtitle.entries):
+            start = _normalize_time_to_srt(entry.start_time, subtitle.format_type)
+            end = _normalize_time_to_srt(entry.end_time, subtitle.format_type)
+            srt_lines.append(f"{i + 1}")
+            srt_lines.append(f"{start} --> {end}")
+            srt_lines.append(entry.text)
+            if entry.translated:
+                srt_lines.append(entry.translated)
+            srt_lines.append("")
+        self.sub_file_preview.setPlainText("\n".join(srt_lines))
     # ═══════════════════════════════════════════════════════════
     # 字幕导出
     # ═══════════════════════════════════════════════════════════
