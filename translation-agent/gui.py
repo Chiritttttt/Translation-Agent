@@ -5,10 +5,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QComboBox, QLineEdit, QTextEdit, QPushButton, QFileDialog,
     QTabWidget, QMessageBox, QGroupBox, QProgressBar, QDialog,
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QFrame, QGraphicsDropShadowEffect, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+from PyQt6.QtGui import QFont, QColor, QPalette, QIcon, QPixmap
 import openai
 import requests
 from bs4 import BeautifulSoup
@@ -22,7 +22,420 @@ client = openai.OpenAI(
 model = os.getenv("OPENAI_MODEL", "deepseek-chat")
 
 
-# ─── AI 调用 ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# Arco Design 颜色系统
+# ═══════════════════════════════════════════════════════════
+class ArcoColors:
+    """Arco Design 色板"""
+
+    # ── 主色 ──
+    PRIMARY          = "#165DFF"
+    PRIMARY_LIGHT    = "#E8F3FF"
+    PRIMARY_LIGHT2   = "#F2F7FF"
+    PRIMARY_HOVER    = "#4080FF"
+    PRIMARY_ACTIVE   = "#0E42D2"
+
+    # ── 功能色 ──
+    SUCCESS          = "#00B42A"
+    SUCCESS_LIGHT    = "#E8FFEA"
+    WARNING          = "#FF7D00"
+    WARNING_LIGHT    = "#FFF7E8"
+    DANGER           = "#F53F3F"
+    DANGER_LIGHT     = "#FFECE8"
+    INFO             = "#165DFF"
+    INFO_LIGHT       = "#E8F3FF"
+
+    # ── 中性色 ──
+    TEXT_PRIMARY      = "#1D2129"
+    TEXT_REGULAR      = "#4E5969"
+    TEXT_SECONDARY    = "#86909C"
+    TEXT_DISABLED     = "#C9CDD4"
+    TEXT_CAPTION      = "#C9CDD4"
+
+    BORDER           = "#E5E6EB"
+    BORDER_LIGHT     = "#F2F3F5"
+    FILL1            = "#F7F8FA"
+    FILL2            = "#F2F3F5"
+    FILL3            = "#E5E6EB"
+    FILL4            = "#C9CDD4"
+
+    BG_PAGE          = "#F2F3F5"
+    BG_CARD          = "#FFFFFF"
+    BG_ELEVATION     = "#FFFFFF"
+
+    # ── 阴影 ──
+    SHADOW_SM        = "0 1px 2px 0 rgba(0,0,0,0.03), 0 1px 6px -1px rgba(0,0,0,0.02), 0 2px 4px 0 rgba(0,0,0,0.02)"
+    SHADOW_MD        = "0 3px 6px -4px rgba(0,0,0,0.12), 0 6px 16px 0 rgba(0,0,0,0.08), 0 9px 28px 8px rgba(0,0,0,0.05)"
+    SHADOW_LG        = "0 6px 30px 5px rgba(0,0,0,0.05), 0 16px 24px 2px rgba(0,0,0,0.04), 0 8px 10px -5px rgba(0,0,0,0.08)"
+
+    # ── 圆角 ──
+    RADIUS_SM = "4px"
+    RADIUS_MD = "8px"
+    RADIUS_LG = "12px"
+
+    # ── 字体 ──
+    FONT_FAMILY = "'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif"
+
+
+# ═══════════════════════════════════════════════════════════
+# Arco Design QSS 样式表
+# ═══════════════════════════════════════════════════════════
+def arco_global_stylesheet():
+    C = ArcoColors
+    return f"""
+    /* ── 全局 ── */
+    QWidget {{
+        font-family: {C.FONT_FAMILY};
+        font-size: 14px;
+        color: {C.TEXT_PRIMARY};
+    }}
+
+    /* ── 主窗口 ── */
+    QMainWindow {{
+        background-color: {C.BG_PAGE};
+    }}
+
+    /* ── 卡片容器 (QGroupBox) ── */
+    QGroupBox {{
+        background: {C.BG_CARD};
+        border: 1px solid {C.BORDER_LIGHT};
+        border-radius: {C.RADIUS_LG};
+        padding: 20px 20px 16px 20px;
+        margin-top: 0px;
+        margin-bottom: 4px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        subcontrol-position: top left;
+        color: {C.TEXT_PRIMARY};
+        font-size: 14px;
+        font-weight: 600;
+        padding: 0 0 12px 0;
+        left: 20px;
+    }}
+
+    /* ── 输入框 ── */
+    QLineEdit {{
+        background: {C.BG_CARD};
+        border: 1px solid {C.BORDER};
+        border-radius: {C.RADIUS_MD};
+        padding: 8px 14px;
+        font-size: 14px;
+        color: {C.TEXT_PRIMARY};
+        selection-background-color: {C.PRIMARY_LIGHT};
+        selection-color: {C.PRIMARY};
+    }}
+    QLineEdit:hover {{
+        border-color: {C.PRIMARY_HOVER};
+    }}
+    QLineEdit:focus {{
+        border-color: {C.PRIMARY};
+        border-width: 2px;
+        padding: 7px 13px;
+    }}
+    QLineEdit:disabled {{
+        background: {C.FILL1};
+        color: {C.TEXT_DISABLED};
+        border-color: {C.BORDER_LIGHT};
+    }}
+
+    /* ── 文本编辑框 ── */
+    QTextEdit {{
+        background: {C.BG_CARD};
+        border: 1px solid {C.BORDER};
+        border-radius: {C.RADIUS_MD};
+        padding: 10px 14px;
+        font-size: 14px;
+        line-height: 1.6;
+        color: {C.TEXT_PRIMARY};
+        selection-background-color: {C.PRIMARY_LIGHT};
+        selection-color: {C.PRIMARY};
+    }}
+    QTextEdit:hover {{
+        border-color: {C.PRIMARY_HOVER};
+    }}
+    QTextEdit:focus {{
+        border-color: {C.PRIMARY};
+        border-width: 2px;
+        padding: 9px 13px;
+    }}
+    QTextEdit:read-only {{
+        background: {C.FILL1};
+        color: {C.TEXT_REGULAR};
+        border-color: {C.BORDER_LIGHT};
+    }}
+
+    /* ── 下拉框 ── */
+    QComboBox {{
+        background: {C.BG_CARD};
+        border: 1px solid {C.BORDER};
+        border-radius: {C.RADIUS_MD};
+        padding: 8px 36px 8px 14px;
+        font-size: 14px;
+        color: {C.TEXT_PRIMARY};
+        min-height: 22px;
+    }}
+    QComboBox:hover {{
+        border-color: {C.PRIMARY_HOVER};
+    }}
+    QComboBox:focus, QComboBox::drop-down:pressed {{
+        border-color: {C.PRIMARY};
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: right center;
+        width: 28px;
+        border: none;
+        background: transparent;
+    }}
+    QComboBox::down-arrow {{
+        width: 12px;
+        height: 12px;
+        image: none;
+        border-left: 5px solid transparent;
+        border-right: 5px solid transparent;
+        border-top: 6px solid {C.TEXT_SECONDARY};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {C.BG_ELEVATION};
+        color: {C.TEXT_PRIMARY};
+        border: 1px solid {C.BORDER};
+        border-radius: {C.RADIUS_MD};
+        padding: 4px 0;
+        selection-background-color: {C.PRIMARY_LIGHT};
+        selection-color: {C.PRIMARY};
+        outline: none;
+    }}
+    QComboBox QAbstractItemView::item {{
+        height: 36px;
+        padding: 0 14px;
+        color: {C.TEXT_PRIMARY};
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background-color: {C.FILL1};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: {C.PRIMARY_LIGHT};
+        color: {C.PRIMARY};
+    }}
+
+    /* ── 标签页 ── */
+    QTabWidget::pane {{
+        border: none;
+        background: transparent;
+        border-radius: {C.RADIUS_MD};
+    }}
+    QTabBar {{
+        background: transparent;
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {C.TEXT_SECONDARY};
+        font-size: 14px;
+        font-weight: 500;
+        padding: 10px 20px;
+        margin-right: 2px;
+        border: none;
+        border-radius: {C.RADIUS_MD} {C.RADIUS_MD} 0 0;
+        border-bottom: 2px solid transparent;
+    }}
+    QTabBar::tab:hover {{
+        color: {C.TEXT_PRIMARY};
+        background: {C.FILL1};
+    }}
+    QTabBar::tab:selected {{
+        color: {C.PRIMARY};
+        background: {C.BG_CARD};
+        border-bottom: 2px solid {C.PRIMARY};
+        font-weight: 600;
+    }}
+
+    /* ── 主按钮 (Primary) ── */
+    QPushButton#primaryBtn {{
+        background: {C.PRIMARY};
+        color: #FFFFFF;
+        border: none;
+        border-radius: {C.RADIUS_MD};
+        padding: 10px 24px;
+        font-size: 15px;
+        font-weight: 600;
+    }}
+    QPushButton#primaryBtn:hover {{
+        background: {C.PRIMARY_HOVER};
+    }}
+    QPushButton#primaryBtn:pressed {{
+        background: {C.PRIMARY_ACTIVE};
+    }}
+    QPushButton#primaryBtn:disabled {{
+        background: {C.FILL3};
+        color: {C.TEXT_DISABLED};
+    }}
+
+    /* ── 次按钮 (Secondary/Outline) ── */
+    QPushButton#outlineBtn {{
+        background: transparent;
+        color: {C.TEXT_REGULAR};
+        border: 1px solid {C.BORDER};
+        border-radius: {C.RADIUS_MD};
+        padding: 8px 16px;
+        font-size: 13px;
+        font-weight: 500;
+    }}
+    QPushButton#outlineBtn:hover {{
+        color: {C.PRIMARY};
+        border-color: {C.PRIMARY};
+        background: {C.PRIMARY_LIGHT2};
+    }}
+    QPushButton#outlineBtn:pressed {{
+        color: {C.PRIMARY_ACTIVE};
+        border-color: {C.PRIMARY_ACTIVE};
+    }}
+    QPushButton#outlineBtn:disabled {{
+        color: {C.TEXT_DISABLED};
+        border-color: {C.BORDER_LIGHT};
+    }}
+
+    /* ── 文字按钮 (Text) ── */
+    QPushButton#textBtn {{
+        background: transparent;
+        color: {C.TEXT_REGULAR};
+        border: none;
+        border-radius: {C.RADIUS_SM};
+        padding: 8px 12px;
+        font-size: 13px;
+    }}
+    QPushButton#textBtn:hover {{
+        background: {C.FILL1};
+        color: {C.PRIMARY};
+    }}
+    QPushButton#textBtn:disabled {{
+        color: {C.TEXT_DISABLED};
+    }}
+
+    /* ── 普通按钮 (兜底，无 objectName 的) ── */
+    QPushButton {{
+        background: transparent;
+        color: {C.TEXT_REGULAR};
+        border: 1px solid {C.BORDER};
+        border-radius: {C.RADIUS_MD};
+        padding: 8px 16px;
+        font-size: 13px;
+        font-weight: 500;
+    }}
+    QPushButton:hover {{
+        color: {C.PRIMARY};
+        border-color: {C.PRIMARY};
+        background: {C.PRIMARY_LIGHT2};
+    }}
+    QPushButton:pressed {{
+        color: {C.PRIMARY_ACTIVE};
+        border-color: {C.PRIMARY_ACTIVE};
+    }}
+    QPushButton:disabled {{
+        color: {C.TEXT_DISABLED};
+        border-color: {C.BORDER_LIGHT};
+    }}
+
+    /* ── 进度条 ── */
+    QProgressBar {{
+        background: {C.FILL2};
+        border: none;
+        border-radius: 100px;
+        height: 8px;
+        text-align: center;
+    }}
+    QProgressBar::chunk {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+            stop:0 {C.PRIMARY}, stop:1 {C.PRIMARY_HOVER});
+        border-radius: 100px;
+    }}
+
+    /* ── 单选按钮 ── */
+    QRadioButton {{
+        font-size: 14px;
+        color: {C.TEXT_PRIMARY};
+        spacing: 8px;
+        padding: 6px 0;
+    }}
+    QRadioButton::indicator {{
+        width: 16px;
+        height: 16px;
+        border: 2px solid {C.BORDER};
+        border-radius: 50%;
+        background: {C.BG_CARD};
+    }}
+    QRadioButton::indicator:hover {{
+        border-color: {C.PRIMARY_HOVER};
+    }}
+    QRadioButton::indicator:checked {{
+        border: 5px solid {C.PRIMARY};
+        background: transparent;
+    }}
+
+    /* ── 表格 ── */
+    QTableWidget {{
+        background: {C.BG_CARD};
+        alternate-background-color: {C.FILL1};
+        border: 1px solid {C.BORDER_LIGHT};
+        border-radius: {C.RADIUS_MD};
+        font-size: 13px;
+        gridline-color: {C.BORDER_LIGHT};
+        selection-background-color: {C.PRIMARY_LIGHT};
+        selection-color: {C.PRIMARY};
+    }}
+    QTableWidget::item {{
+        padding: 10px 14px;
+        border-bottom: 1px solid {C.BORDER_LIGHT};
+    }}
+    QTableWidget::item:hover {{
+        background: {C.FILL1};
+    }}
+    QHeaderView::section {{
+        background: {C.FILL1};
+        color: {C.TEXT_REGULAR};
+        padding: 10px 14px;
+        border: none;
+        border-bottom: 1px solid {C.BORDER};
+        border-right: 1px solid {C.BORDER_LIGHT};
+        font-weight: 600;
+        font-size: 13px;
+    }}
+    QTableWidget QTableWidget {{
+        border-radius: 0px;
+    }}
+    """
+
+
+# ═══════════════════════════════════════════════════════════
+# 辅助函数：创建分隔线
+# ═══════════════════════════════════════════════════════════
+def make_h_line(color=None):
+    """水平分隔线"""
+    C = ArcoColors
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background-color: {color or C.BORDER_LIGHT}; border: none; margin: 4px 0;")
+    return line
+
+
+def make_shadow_widget(widget, shadow_type="sm"):
+    """给 widget 添加 Arco Design 风格阴影"""
+    C = ArcoColors
+    shadow = QGraphicsDropShadowEffect()
+    shadow.setBlurRadius(12)
+    shadow.setOffset(0, 2)
+    shadow.setColor(QColor(0, 0, 0, 20))
+    if shadow_type == "md":
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 30))
+    widget.setGraphicsEffect(shadow)
+
+
+# ═══════════════════════════════════════════════════════════
+# AI 调用
+# ═══════════════════════════════════════════════════════════
 def chat(system, user, temperature=0.3):
     resp = client.chat.completions.create(
         model=model, temperature=temperature,
@@ -67,7 +480,9 @@ def split_chunks(text, max_words=3000):
     return chunks
 
 
-# ─── 五步翻译工作流 ──────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# 五步翻译工作流
+# ═══════════════════════════════════════════════════════════
 def step1_analyze(text, source_lang, target_lang, audience, style):
     sys_prompt = """你是专业翻译前置分析师。
 输出严格按照以下固定Markdown结构：
@@ -104,7 +519,6 @@ Reproduce this tone faithfully in {target_lang}. Match register, rhythm, persona
         style_block = f"""{style}
 Apply this style consistently across full text."""
 
-    # 从本地术语库注入约束
     glossary_block = get_glossary_prompt_block(source_lang, target_lang)
 
     prompt_full = f"""You are a professional translator. Translate from {source_lang} to {target_lang}.
@@ -174,7 +588,9 @@ def step5_final(draft, critique, target_lang):
     )
 
 
-# ─── 翻译线程 ────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# 翻译线程
+# ═══════════════════════════════════════════════════════════
 class TranslateWorker(QThread):
     progress = pyqtSignal(str, int)
     analysis_done = pyqtSignal(str)
@@ -193,32 +609,31 @@ class TranslateWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit("📋 第一步：深度分析...", 1)
+            self.progress.emit("第一步：深度分析...", 1)
             analysis = step1_analyze(self.source_text, self.source_lang,
                                      self.target_lang, self.audience, self.style)
             self.analysis_done.emit(analysis)
 
-            # 自动从分析报告中提取术语并加入本地术语库
             from glossary import extract_terms_from_analysis, add_terms_batch
             new_terms = extract_terms_from_analysis(analysis, self.source_lang, self.target_lang)
             if new_terms:
                 added, _ = add_terms_batch(new_terms, self.source_lang, self.target_lang)
-                self.progress.emit(f"📚 术语入库：新增 {added} 条", 1)
+                self.progress.emit(f"术语入库：新增 {added} 条", 1)
 
-            self.progress.emit("📝 第二步：组装提示...", 2)
+            self.progress.emit("第二步：组装提示...", 2)
             prompt = step2_build_prompt(analysis, self.source_lang,
                                         self.target_lang, self.audience, self.style)
 
-            self.progress.emit("✍️  第三步：初译...", 3)
+            self.progress.emit("第三步：初译...", 3)
             draft = step3_draft(self.source_text, prompt,
                                 self.source_lang, self.target_lang)
 
-            self.progress.emit("🔍 第四步：审校...", 4)
+            self.progress.emit("第四步：审校...", 4)
             critique = step4_critique(self.source_text, draft, analysis,
                                       self.source_lang, self.target_lang)
             self.critique_done.emit(critique)
 
-            self.progress.emit("✅ 第五步：终稿润色...", 5)
+            self.progress.emit("第五步：终稿润色...", 5)
             final = step5_final(draft, critique, self.target_lang)
             self.finished.emit(final)
 
@@ -226,25 +641,85 @@ class TranslateWorker(QThread):
             self.error.emit(str(e))
 
 
-# ─── 导出对话框 ───────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# 导出对话框 — Arco Design 风格
+# ═══════════════════════════════════════════════════════════
 class ExportDialog(QDialog):
     def __init__(self, parent, file_type):
         super().__init__(parent)
         self.setWindowTitle("导出设置")
-        self.setMinimumWidth(320)
-
-        self.setStyleSheet("""
-            QDialog { background-color: #fff; color: #000; }
-            QLabel { font-size:14px; color:#000; }
-            QRadioButton { font-size:14px; color:#000; padding:4px 0; }
-            QPushButton { padding:8px 14px; font-size:14px; border-radius:6px; color:#000; }
+        self.setMinimumWidth(360)
+        self.setMinimumHeight(420)
+        C = ArcoColors
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {C.BG_PAGE};
+                color: {C.TEXT_PRIMARY};
+            }}
+            QLabel {{
+                font-size: 14px;
+                color: {C.TEXT_PRIMARY};
+                font-weight: 600;
+            }}
+            QRadioButton {{
+                font-size: 14px;
+                color: {C.TEXT_PRIMARY};
+                spacing: 8px;
+                padding: 7px 12px;
+                border-radius: {C.RADIUS_MD};
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+            }}
+            QRadioButton:hover {{
+                border-color: {C.PRIMARY_HOVER};
+                background: {C.PRIMARY_LIGHT2};
+            }}
+            QRadioButton::indicator {{
+                width: 16px;
+                height: 16px;
+                border: 2px solid {C.BORDER};
+                border-radius: 50%;
+                background: {C.BG_CARD};
+            }}
+            QRadioButton::indicator:checked {{
+                border: 5px solid {C.PRIMARY};
+            }}
+            QPushButton {{
+                background: {C.PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: {C.RADIUS_MD};
+                padding: 10px 24px;
+                font-size: 14px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: {C.PRIMARY_HOVER};
+            }}
         """)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(20,20,20,20)
+        # 带阴影的卡片布局
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_LG};
+                padding: 24px;
+            }}
+        """)
+        make_shadow_widget(card, "md")
+        card_layout = QVBoxLayout(card)
+        card_layout.setSpacing(16)
+        card_layout.setContentsMargins(24, 24, 24, 24)
 
-        layout.addWidget(QLabel("导出格式："))
+        # 外层布局
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 24, 24, 24)
+        outer.addWidget(card)
+
+        card_layout.addWidget(QLabel("导出格式"))
+
         self.fmt_group = QButtonGroup()
         fmt_options = {
             "pdf": "PDF",
@@ -256,19 +731,26 @@ class ExportDialog(QDialog):
             "ppt": "PowerPoint (.ppt)",
         }
         default_fmt = file_type if file_type in fmt_options else "docx"
+        fmt_grid = QVBoxLayout()
+        fmt_grid.setSpacing(6)
         for fmt, label in fmt_options.items():
             rb = QRadioButton(label)
             rb.setProperty("val", fmt)
             if fmt == default_fmt:
                 rb.setChecked(True)
             self.fmt_group.addButton(rb)
-            layout.addWidget(rb)
+            fmt_grid.addWidget(rb)
+        card_layout.addLayout(fmt_grid)
 
-        layout.addWidget(QLabel("导出模式："))
+        card_layout.addWidget(make_h_line())
+        card_layout.addWidget(QLabel("导出模式"))
+
         self.mode_group = QButtonGroup()
+        mode_grid = QVBoxLayout()
+        mode_grid.setSpacing(6)
         for mode, label in [
-            ("bilingual", "行对照模式（原文+译文）"),
             ("paragraph", "段落对照模式（推荐）"),
+            ("bilingual", "行对照模式（原文+译文）"),
             ("translation", "仅译文模式"),
         ]:
             rb = QRadioButton(label)
@@ -276,11 +758,18 @@ class ExportDialog(QDialog):
             if mode == "paragraph":
                 rb.setChecked(True)
             self.mode_group.addButton(rb)
-            layout.addWidget(rb)
+            mode_grid.addWidget(rb)
+        card_layout.addLayout(mode_grid)
 
+        card_layout.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
         btn = QPushButton("确认导出")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self.accept)
-        layout.addWidget(btn)
+        btn_row.addWidget(btn)
+        card_layout.addLayout(btn_row)
 
     def get_fmt(self):
         for b in self.fmt_group.buttons():
@@ -293,12 +782,14 @@ class ExportDialog(QDialog):
                 return b.property("val")
 
 
-# ─── 主窗口 ──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# 主窗口 — Arco Design 风格
+# ═══════════════════════════════════════════════════════════
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Translation Agent")
-        self.setMinimumSize(980, 780)
+        self.setMinimumSize(1060, 820)
         self.file_path = None
         self.file_type = None
         self.file_extra = None
@@ -310,153 +801,294 @@ class MainWindow(QMainWindow):
         self.apply_styles()
 
     def apply_styles(self):
-        self.setStyleSheet("""
-            QMainWindow { background-color: #FFFAF0; }
-            QGroupBox { background:#fff; border:none; border-radius:12px; padding:14px; margin-top:10px; }
-            QGroupBox::title { color:#222; font-size:14px; font-weight:bold; }
-            QLineEdit, QTextEdit { background:#fff; border:1px solid #EAEAEA; border-radius:8px; padding:9px 12px; font-size:14px; color:#222; }
-            QComboBox { background:#fff; border:1px solid #EAEAEA; border-radius:8px; padding:9px 12px; font-size:14px; color:#222; }
-            QComboBox QAbstractItemView { background-color:#fff; color:#222; border:1px solid #EAEAEA; }
-            QComboBox::item { color:#222; }
-            QTabBar::tab { background:#F5F5F5; border-radius:8px 8px 0 0; padding:9px 16px; margin-right:4px; color:#222; }
-            QTabBar::tab:selected { background:#D81F26; color:#fff; }
-            QPushButton { background:#fff; border:1px solid #EAEAEA; border-radius:8px; padding:8px 16px; font-size:14px; color:#222; }
-            QPushButton#primaryBtn { background:#D81F26; color:#fff; border:none; font-weight:bold; }
-            QProgressBar { background:#F0F0F0; border-radius:3px; height:6px; }
-            QProgressBar::chunk { background:#D81F26; }
-        """)
+        self.setStyleSheet(arco_global_stylesheet())
 
     def setup_ui(self):
+        C = ArcoColors
+
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setSpacing(10)
-        layout.setContentsMargins(16,16,16,16)
+        layout.setSpacing(12)
+        layout.setContentsMargins(24, 20, 24, 20)
+
+        # ── 顶部标题栏 ──
+        header = QFrame()
+        header.setStyleSheet("background: transparent; border: none;")
+        header_layout = QVBoxLayout(header)
+        header_layout.setSpacing(4)
+        header_layout.setContentsMargins(0, 0, 0, 0)
 
         title = QLabel("Translation Agent")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setFont(QFont("Arial", 18, QFont.Weight.Bold))
-        title.setStyleSheet("color: #222;")
-        layout.addWidget(title)
+        title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 22, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
+        header_layout.addWidget(title)
 
-        sub = QLabel("支持 PDF / Word / Excel / PPT · 分析→提示→初译→审校→终稿")
+        sub = QLabel("支持 PDF / Word / Excel / PPT  ·  分析 → 提示 → 初译 → 审校 → 终稿")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub.setStyleSheet("color:gray;font-size:12px;")
-        layout.addWidget(sub)
+        sub.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent; border: none; letter-spacing: 0.5px;")
+        header_layout.addWidget(sub)
 
-        sg = QGroupBox("⚙️ 翻译设置")
+        layout.addWidget(header)
+
+        # ── 翻译设置卡片 ──
+        sg = QFrame()
+        sg.setObjectName("card")
+        sg.setStyleSheet(f"""
+            QFrame#card {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_LG};
+            }}
+        """)
+        make_shadow_widget(sg, "sm")
         sl = QHBoxLayout(sg)
-        for lbl, items, attr in [
+        sl.setSpacing(24)
+        sl.setContentsMargins(20, 16, 20, 16)
+
+        # 卡片内小标题
+        settings_title = QLabel("翻译设置")
+        settings_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 13, QFont.Weight.Bold))
+        settings_title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+
+        settings_col = QVBoxLayout()
+        settings_col.addWidget(settings_title)
+        settings_col.addLayout(sl)
+        layout.addLayout(settings_col)
+
+        for lbl_text, items, attr in [
             ("源语言", ["English","Chinese","Japanese"], "source_lang"),
             ("目标语言", ["Chinese","English","Japanese"], "target_lang"),
         ]:
             col = QVBoxLayout()
-            col.addWidget(QLabel(lbl))
-            cb = QComboBox(); cb.addItems(items)
+            col.setSpacing(6)
+            lbl = QLabel(lbl_text)
+            lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            col.addWidget(lbl)
+            cb = QComboBox()
+            cb.addItems(items)
+            cb.setFixedHeight(38)
             setattr(self, attr, cb)
             col.addWidget(cb)
             sl.addLayout(col)
-        for lbl, ph, attr in [
-            ("风格", "formal/conversational/technical/auto", "style_input"),
-            ("目标读者", "general/technical/academic/business", "audience_input"),
+
+        for lbl_text, ph, attr in [
+            ("风格", "formal / conversational / technical / auto", "style_input"),
+            ("目标读者", "general / technical / academic / business", "audience_input"),
         ]:
             col = QVBoxLayout()
-            col.addWidget(QLabel(lbl))
-            le = QLineEdit(); le.setPlaceholderText(ph)
+            col.setSpacing(6)
+            lbl = QLabel(lbl_text)
+            lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; font-weight: 500; border: none; background: transparent;")
+            col.addWidget(lbl)
+            le = QLineEdit()
+            le.setPlaceholderText(ph)
+            le.setFixedHeight(38)
             setattr(self, attr, le)
             col.addWidget(le)
             sl.addLayout(col)
-        layout.addWidget(sg)
 
-        ig = QGroupBox("📄 输入内容")
+        # ── 输入内容卡片 ──
+        ig = QFrame()
+        ig.setObjectName("inputCard")
+        ig.setStyleSheet(f"""
+            QFrame#inputCard {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_LG};
+            }}
+        """)
+        make_shadow_widget(ig, "sm")
         il = QVBoxLayout(ig)
-        self.tabs = QTabWidget()
+        il.setSpacing(8)
+        il.setContentsMargins(20, 16, 20, 16)
 
-        tw = QWidget();
+        input_title = QLabel("输入内容")
+        input_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 13, QFont.Weight.Bold))
+        input_title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+        il.addWidget(input_title)
+
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+                background: {C.BG_CARD};
+                padding: 4px;
+            }}
+        """)
+
+        # Tab 1: 粘贴文字
+        tw = QWidget()
         tl = QVBoxLayout(tw)
+        tl.setContentsMargins(8, 8, 8, 8)
         self.text_input = QTextEdit()
         self.text_input.setPlaceholderText("在此粘贴需要翻译的文字...")
-        self.text_input.setMinimumHeight(90)
-        # 下面这行是唯一正确、不报错的设置
+        self.text_input.setMinimumHeight(100)
         from PyQt6.QtGui import QTextOption
         self.text_input.setWordWrapMode(QTextOption.WrapMode.WordWrap)
         tl.addWidget(self.text_input)
-        self.tabs.addTab(tw, "📝 粘贴文字")
+        self.tabs.addTab(tw, "  粘贴文字  ")
 
-        uw = QWidget(); ul = QVBoxLayout(uw)
+        # Tab 2: URL
+        uw = QWidget()
+        ul = QVBoxLayout(uw)
+        ul.setContentsMargins(8, 12, 8, 8)
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("https://example.com/article")
-        ul.addWidget(self.url_input); ul.addStretch()
-        self.tabs.addTab(uw, "🌐 URL")
+        self.url_input.setFixedHeight(38)
+        ul.addWidget(self.url_input)
+        ul.addStretch()
+        self.tabs.addTab(uw, "  URL  ")
 
-        fw = QWidget(); fl = QVBoxLayout(fw)
+        # Tab 3: 上传文件
+        fw = QWidget()
+        fl = QVBoxLayout(fw)
+        fl.setContentsMargins(8, 12, 8, 8)
         fbl = QHBoxLayout()
-        self.file_btn = QPushButton("📁 选择文件")
+        self.file_btn = QPushButton("选择文件")
+        self.file_btn.setObjectName("outlineBtn")
+        self.file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.file_btn.clicked.connect(self.choose_file)
         self.file_label = QLabel("支持 .pdf / .docx / .doc / .xlsx / .xls / .pptx / .ppt")
+        self.file_label.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; border: none; background: transparent;")
         fbl.addWidget(self.file_btn)
         fbl.addWidget(self.file_label)
         fbl.addStretch()
-        fl.addLayout(fbl); fl.addStretch()
-        self.tabs.addTab(fw, "📁 上传文件")
+        fl.addLayout(fbl)
+        fl.addStretch()
+        self.tabs.addTab(fw, "  上传文件  ")
 
         il.addWidget(self.tabs)
-        layout.addWidget(ig)
 
+        input_col = QVBoxLayout()
+        input_col.addWidget(input_title)
+        input_col.addWidget(ig)
+        layout.addLayout(input_col)
+
+        # ── 操作栏 ──
         btn_row = QHBoxLayout()
-        self.translate_btn = QPushButton("🚀 开始翻译")
+        btn_row.setSpacing(8)
+
+        self.translate_btn = QPushButton("  开始翻译  ")
         self.translate_btn.setObjectName("primaryBtn")
+        self.translate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.translate_btn.setMinimumHeight(40)
         self.translate_btn.clicked.connect(self.do_translate)
 
-        self.export_btn = QPushButton("💾 导出译文")
+        self.export_btn = QPushButton("  导出译文  ")
+        self.export_btn.setObjectName("outlineBtn")
+        self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_btn.setMinimumHeight(36)
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.do_export)
 
-        self.export_term_btn = QPushButton("📚 导出术语")
+        self.export_term_btn = QPushButton("  导出术语  ")
+        self.export_term_btn.setObjectName("outlineBtn")
+        self.export_term_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_term_btn.setMinimumHeight(36)
         self.export_term_btn.clicked.connect(self.export_glossary)
 
-        self.export_critique_btn = QPushButton("🔍 导出审校报告")
+        self.export_critique_btn = QPushButton("  导出审校  ")
+        self.export_critique_btn.setObjectName("outlineBtn")
+        self.export_critique_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_critique_btn.setMinimumHeight(36)
         self.export_critique_btn.setEnabled(False)
         self.export_critique_btn.clicked.connect(self.export_critique)
 
-        self.glossary_btn = QPushButton("📖 术语库")
+        self.glossary_btn = QPushButton("  术语库  ")
+        self.glossary_btn.setObjectName("outlineBtn")
+        self.glossary_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.glossary_btn.setMinimumHeight(36)
         self.glossary_btn.clicked.connect(self.open_glossary_manager)
 
-        btn_row.addWidget(self.translate_btn, stretch=3)
-        btn_row.addWidget(self.export_btn, stretch=1)
-        btn_row.addWidget(self.export_term_btn, stretch=1)
-        btn_row.addWidget(self.export_critique_btn, stretch=1)
-        btn_row.addWidget(self.glossary_btn, stretch=1)
+        btn_row.addWidget(self.translate_btn, stretch=0)
+        btn_row.addSpacing(12)
+        btn_row.addWidget(self.export_btn)
+        btn_row.addWidget(self.export_term_btn)
+        btn_row.addWidget(self.export_critique_btn)
+        btn_row.addWidget(self.glossary_btn)
+        btn_row.addStretch()
         layout.addLayout(btn_row)
 
+        # ── 进度条 ──
+        progress_container = QFrame()
+        progress_container.setStyleSheet("background: transparent; border: none;")
+        pc_layout = QVBoxLayout(progress_container)
+        pc_layout.setSpacing(6)
+        pc_layout.setContentsMargins(0, 0, 0, 0)
+
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0,5)
+        self.progress_bar.setRange(0, 5)
         self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setTextVisible(False)
+        pc_layout.addWidget(self.progress_bar)
 
         self.progress_label = QLabel("")
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.progress_label)
+        self.progress_label.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent; border: none;")
+        pc_layout.addWidget(self.progress_label)
+        layout.addWidget(progress_container)
 
-        rg = QGroupBox("📊 结果")
+        # ── 结果卡片 ──
+        rg = QFrame()
+        rg.setObjectName("resultCard")
+        rg.setStyleSheet(f"""
+            QFrame#resultCard {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_LG};
+            }}
+        """)
+        make_shadow_widget(rg, "sm")
         rl = QVBoxLayout(rg)
+        rl.setSpacing(8)
+        rl.setContentsMargins(20, 16, 20, 16)
+
+        result_title = QLabel("翻译结果")
+        result_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 13, QFont.Weight.Bold))
+        result_title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+        rl.addWidget(result_title)
+
         self.result_tabs = QTabWidget()
+        self.result_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+                background: {C.BG_CARD};
+                padding: 4px;
+            }}
+        """)
+
         self.analysis_output = QTextEdit()
         self.analysis_output.setReadOnly(True)
-        self.result_tabs.addTab(self.analysis_output, "📋 分析报告")
+        self.result_tabs.addTab(self.analysis_output, "  分析报告  ")
+
         self.critique_output = QTextEdit()
         self.critique_output.setReadOnly(True)
-        self.result_tabs.addTab(self.critique_output, "🔍 审校报告")
-        fww = QWidget(); fwl = QVBoxLayout(fww)
+        self.result_tabs.addTab(self.critique_output, "  审校报告  ")
+
+        fww = QWidget()
+        fwl = QVBoxLayout(fww)
+        fwl.setContentsMargins(8, 8, 8, 8)
         self.result_output = QTextEdit()
         self.result_output.setReadOnly(True)
         fwl.addWidget(self.result_output)
-        copy_btn = QPushButton("📋 复制译文")
+        copy_btn = QPushButton("  复制译文  ")
+        copy_btn.setObjectName("textBtn")
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn.clicked.connect(self.copy_result)
         fwl.addWidget(copy_btn)
-        self.result_tabs.addTab(fww, "✅ 终稿译文")
+        self.result_tabs.addTab(fww, "  终稿译文  ")
+
         rl.addWidget(self.result_tabs)
-        layout.addWidget(rg, stretch=1)
+
+        result_col = QVBoxLayout()
+        result_col.addWidget(result_title)
+        result_col.addWidget(rg)
+        layout.addLayout(result_col, stretch=1)
 
     def _ocr_progress_handler(self, current, total, message):
         """OCR 进度回调，在主线程安全地更新 UI"""
@@ -470,7 +1102,6 @@ class MainWindow(QMainWindow):
                 self.progress_bar, "setValue",
                 Q_ARG(int, int(current * 5 / max(total, 1)))
             )
-        # 强制刷新 UI
         QApplication.processEvents()
 
     def choose_file(self):
@@ -483,7 +1114,6 @@ class MainWindow(QMainWindow):
 
             from file_handler import read_file, set_ocr_progress_callback
 
-            # 注册 OCR 进度回调（仅 PDF 需要）
             ext = path.lower().split(".")[-1]
             if ext == "pdf":
                 set_ocr_progress_callback(self._ocr_progress_handler)
@@ -494,7 +1124,6 @@ class MainWindow(QMainWindow):
 
             file_type, content, extra = read_file(path)
 
-            # 清除回调
             set_ocr_progress_callback(None)
             self.progress_bar.setValue(0)
             self.progress_label.setText("")
@@ -574,7 +1203,7 @@ class MainWindow(QMainWindow):
     def on_finished(self, result):
         self.last_result = result
         self.result_output.setPlainText(result)
-        self.progress_label.setText("✅ 翻译完成！")
+        self.progress_label.setText("翻译完成！")
         self.progress_bar.setValue(5)
         self.translate_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
@@ -613,7 +1242,6 @@ class MainWindow(QMainWindow):
                 doc = Document()
                 doc.add_heading(f"术语表 ({source_lang} → {target_lang})", level=1)
 
-                # 按分类分组
                 categories = {}
                 for t in terms:
                     cat = t.get("category", "术语")
@@ -629,7 +1257,7 @@ class MainWindow(QMainWindow):
                     for idx, txt in enumerate(["原文", "译文", "分类"]):
                         run = hdr[idx].paragraphs[0].add_run(txt)
                         run.bold = True
-                        run.font.color.rgb = RGBColor(0x4F, 0x8E, 0xF7)
+                        run.font.color.rgb = RGBColor(0x16, 0x5D, 0xFF)
                     for t in cat_terms:
                         row = table.add_row().cells
                         row[0].paragraphs[0].add_run(t["source"])
@@ -643,7 +1271,7 @@ class MainWindow(QMainWindow):
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
 
-            QMessageBox.information(self, "✅ 导出成功",
+            QMessageBox.information(self, "导出成功",
                 f"术语库已保存（{len(terms)} 条）：\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "失败", str(e))
@@ -667,7 +1295,7 @@ class MainWindow(QMainWindow):
             else:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(self.last_critique)
-            QMessageBox.information(self, "✅ 导出成功", f"审校报告已保存：\n{path}")
+            QMessageBox.information(self, "导出成功", f"审校报告已保存：\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "失败", str(e))
 
@@ -706,43 +1334,25 @@ class MainWindow(QMainWindow):
                 else:
                     export_pdf_translation(self.last_result, out_path)
 
-
             elif fmt in ["docx", "doc"]:
-
                 if mode == "bilingual":
-
                     export_docx_bilingual(self.last_source, self.last_result,
-
-                                          out_path, self.file_path)  # ← 加 self.file_path
-
+                                          out_path, self.file_path)
                 elif mode == "paragraph":
-
                     export_docx_paragraph(self.last_source, self.last_result,
-
-                                          out_path, self.file_path)  # ← 加 self.file_path
-
+                                          out_path, self.file_path)
                 else:
-
                     export_docx_translation(self.last_result,
-
-                                            out_path, self.file_path)  # ← 加 self.file_path
-
+                                            out_path, self.file_path)
 
             elif fmt in ["xlsx", "xls"]:
-
                 if self.file_extra:
-
                     if mode == "bilingual":
-
                         export_excel_bilingual(self.file_extra, self.last_result,
-
-                                               out_path, self.file_path)  # ← 加 self.file_path
-
+                                               out_path, self.file_path)
                     else:
-
                         export_excel_translation(self.last_result,
-
-                                                 out_path, self.file_path)  # ← 加 self.file_path
+                                                 out_path, self.file_path)
 
             elif fmt in ["pptx", "ppt"]:
                 if self.file_path:
@@ -754,7 +1364,7 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(self, "提示", "需先导入 PPT 文件")
                     return
 
-            QMessageBox.information(self, "✅ 导出成功", f"已保存：\n{out_path}")
+            QMessageBox.information(self, "导出成功", f"已保存：\n{out_path}")
 
         except Exception as e:
             QMessageBox.critical(self, "失败", str(e))
@@ -763,72 +1373,185 @@ class MainWindow(QMainWindow):
         text = self.result_output.toPlainText()
         if text:
             QApplication.clipboard().setText(text)
-            QMessageBox.information(self, "✅", "已复制译文")
+            QMessageBox.information(self, "成功", "已复制译文")
 
     def open_glossary_manager(self):
-        """打开术语库管理窗口"""
+        """打开术语库管理窗口 — Arco Design 风格"""
         from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
         from glossary import (
             get_terms, get_all_lang_pairs, delete_term, delete_lang_pair,
             clear_all, import_glossary_from_text, load_glossary,
         )
 
+        C = ArcoColors
+
         dialog = QDialog(self)
-        dialog.setWindowTitle("📖 术语库管理")
-        dialog.setMinimumSize(700, 520)
-        dialog.setStyleSheet("""
-            QDialog { background-color: #fff; color: #000; }
-            QLabel { font-size:13px; color:#000; }
-            QPushButton { padding:7px 14px; font-size:13px; border-radius:6px; color:#000;
-                          background:#fff; border:1px solid #EAEAEA; }
-            QPushButton:hover { background:#f5f5f5; }
-            QTableWidget { font-size:13px; gridline-color: #EAEAEA; }
-            QHeaderView::section { background:#F5F5F5; padding:6px; border:1px solid #EAEAEA;
-                                   font-weight:bold; font-size:13px; }
-            QComboBox { background:#fff; border:1px solid #EAEAEA; border-radius:6px;
-                        padding:6px 10px; font-size:13px; color:#222; }
-            QTextEdit { background:#fff; border:1px solid #EAEAEA; border-radius:6px;
-                        padding:6px; font-size:13px; color:#222; }
+        dialog.setWindowTitle("术语库管理")
+        dialog.setMinimumSize(760, 560)
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {C.BG_PAGE};
+                color: {C.TEXT_PRIMARY};
+            }}
+            QLabel {{
+                font-size: 13px;
+                color: {C.TEXT_PRIMARY};
+                border: none; background: transparent;
+            }}
+            QPushButton {{
+                background: transparent;
+                color: {C.TEXT_REGULAR};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_MD};
+                padding: 8px 16px;
+                font-size: 13px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                color: {C.PRIMARY};
+                border-color: {C.PRIMARY};
+                background: {C.PRIMARY_LIGHT2};
+            }}
+            QPushButton:disabled {{
+                color: {C.TEXT_DISABLED};
+                border-color: {C.BORDER_LIGHT};
+            }}
+            QPushButton#dangerBtn {{
+                color: {C.DANGER};
+                border-color: {C.DANGER};
+            }}
+            QPushButton#dangerBtn:hover {{
+                background: {C.DANGER_LIGHT};
+                border-color: {C.DANGER};
+                color: {C.DANGER};
+            }}
+            QPushButton#primarySmall {{
+                background: {C.PRIMARY};
+                color: #FFFFFF;
+                border: none;
+                border-radius: {C.RADIUS_MD};
+                padding: 8px 20px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            QPushButton#primarySmall:hover {{
+                background: {C.PRIMARY_HOVER};
+            }}
+            QTableWidget {{
+                background: {C.BG_CARD};
+                alternate-background-color: {C.FILL1};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+                font-size: 13px;
+                gridline-color: {C.BORDER_LIGHT};
+                selection-background-color: {C.PRIMARY_LIGHT};
+                selection-color: {C.PRIMARY};
+            }}
+            QTableWidget::item {{
+                padding: 10px 14px;
+                border-bottom: 1px solid {C.BORDER_LIGHT};
+            }}
+            QHeaderView::section {{
+                background: {C.FILL1};
+                color: {C.TEXT_REGULAR};
+                padding: 10px 14px;
+                border: none;
+                border-bottom: 1px solid {C.BORDER};
+                font-weight: 600;
+                font-size: 13px;
+            }}
+            QComboBox {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_MD};
+                padding: 8px 36px 8px 14px;
+                font-size: 13px;
+                color: {C.TEXT_PRIMARY};
+                min-height: 20px;
+            }}
+            QComboBox:hover {{
+                border-color: {C.PRIMARY_HOVER};
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.BG_ELEVATION};
+                color: {C.TEXT_PRIMARY};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_MD};
+                selection-background-color: {C.PRIMARY_LIGHT};
+                selection-color: {C.PRIMARY};
+            }}
+            QTextEdit {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER};
+                border-radius: {C.RADIUS_MD};
+                padding: 10px 14px;
+                font-size: 13px;
+                color: {C.TEXT_PRIMARY};
+            }}
+            QTextEdit:focus {{
+                border-color: {C.PRIMARY};
+                border-width: 2px;
+                padding: 9px 13px;
+            }}
         """)
 
         main_layout = QVBoxLayout(dialog)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
-        # 标题 + 统计
+        # 标题区
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+        title_lbl = QLabel("术语库")
+        title_lbl.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 18, QFont.Weight.Bold))
+        title_lbl.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+        header_layout.addWidget(title_lbl)
+
         data = load_glossary()
         stats = data.get("stats", {})
-        header_layout = QHBoxLayout()
-        title_lbl = QLabel("📖 术语库")
-        title_lbl.setFont(QFont("Arial", 16, QFont.Weight.Bold))
-        header_layout.addWidget(title_lbl)
-        stats_lbl = QLabel(f"共 {stats.get('total_terms', 0)} 条术语 · "
-                          f"{stats.get('total_pairs', 0)} 个语言对")
-        stats_lbl.setStyleSheet("color: gray; font-size:12px;")
+        stats_lbl = QLabel(f"{stats.get('total_terms', 0)} 条术语  ·  {stats.get('total_pairs', 0)} 个语言对")
+        stats_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; border: none; background: transparent; border: 1px solid {C.BORDER}; border-radius: {C.RADIUS_SM}; padding: 3px 10px; background: {C.FILL1};")
         header_layout.addWidget(stats_lbl)
         header_layout.addStretch()
         main_layout.addLayout(header_layout)
 
-        # 语言对选择
-        lang_row = QHBoxLayout()
-        lang_row.addWidget(QLabel("语言对："))
+        # 语言对选择行
+        lang_card = QFrame()
+        lang_card.setStyleSheet(f"""
+            QFrame {{
+                background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+                padding: 12px 16px;
+            }}
+        """)
+        lang_row = QHBoxLayout(lang_card)
+        lang_row.setContentsMargins(16, 10, 16, 10)
+        lang_row.setSpacing(12)
+
+        lang_lbl = QLabel("语言对")
+        lang_lbl.setStyleSheet(f"color: {C.TEXT_REGULAR}; font-weight: 600; font-size: 13px; border: none; background: transparent;")
+        lang_row.addWidget(lang_lbl)
+
         pairs = get_all_lang_pairs()
         pair_combo = QComboBox()
-        pair_combo.setMinimumWidth(200)
+        pair_combo.setMinimumWidth(220)
+        pair_combo.setFixedHeight(36)
         if pairs:
             for p in pairs:
-                pair_combo.addItem(f"{p['key']}  ({p['count']}条)", p['key'])
+                pair_combo.addItem(f"{p['key']}  ({p['count']} 条)", p['key'])
         else:
             pair_combo.addItem("暂无数据", "")
         lang_row.addWidget(pair_combo)
         lang_row.addStretch()
 
-        # 导入按钮
-        import_btn = QPushButton("📥 导入术语")
+        import_btn = QPushButton("  导入术语  ")
+        import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        import_btn.setFixedHeight(34)
         lang_row.addWidget(import_btn)
-        main_layout.addLayout(lang_row)
+        main_layout.addWidget(lang_card)
 
-        # 术语表格
+        # 表格
         table = QTableWidget()
         table.setColumnCount(4)
         table.setHorizontalHeaderLabels(["原文", "译文", "分类", "添加时间"])
@@ -838,17 +1561,18 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setEditTriggers(QTableWidget.SelectionTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
         main_layout.addWidget(table)
 
         # 操作按钮行
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
 
         def refresh_table():
             pair_key = pair_combo.currentData() or ""
             if not pair_key:
                 table.setRowCount(0)
                 return
-            # 解析 key 如 "en→zh"
             parts = pair_key.split("→")
             sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
             terms = get_terms(sl, tl)
@@ -858,17 +1582,21 @@ class MainWindow(QMainWindow):
                 table.setItem(row_idx, 1, QTableWidgetItem(t.get("target", "")))
                 table.setItem(row_idx, 2, QTableWidgetItem(t.get("category", "")))
                 table.setItem(row_idx, 3, QTableWidgetItem(t.get("added_at", "")))
-            # 更新统计
             data = load_glossary()
             s = data.get("stats", {})
-            stats_lbl.setText(f"共 {s.get('total_terms', 0)} 条术语 · "
-                             f"{s.get('total_pairs', 0)} 个语言对")
+            stats_lbl.setText(f"{s.get('total_terms', 0)} 条术语  ·  {s.get('total_pairs', 0)} 个语言对")
 
-        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn = QPushButton("  刷新  ")
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.setFixedHeight(34)
         refresh_btn.clicked.connect(refresh_table)
         btn_row.addWidget(refresh_btn)
 
-        delete_selected_btn = QPushButton("🗑️ 删除选中")
+        delete_selected_btn = QPushButton("  删除选中  ")
+        delete_selected_btn.setObjectName("dangerBtn")
+        delete_selected_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_selected_btn.setFixedHeight(34)
+
         def delete_selected():
             pair_key = pair_combo.currentData() or ""
             if not pair_key:
@@ -884,7 +1612,11 @@ class MainWindow(QMainWindow):
         delete_selected_btn.clicked.connect(delete_selected)
         btn_row.addWidget(delete_selected_btn)
 
-        clear_btn = QPushButton("⚠️ 清空当前语言对")
+        clear_btn = QPushButton("  清空当前语言对  ")
+        clear_btn.setObjectName("dangerBtn")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setFixedHeight(34)
+
         def clear_pair():
             pair_key = pair_combo.currentData() or ""
             if not pair_key:
@@ -905,29 +1637,82 @@ class MainWindow(QMainWindow):
         # 导入术语对话框
         def do_import():
             imp_dialog = QDialog(dialog)
-            imp_dialog.setWindowTitle("📥 导入术语")
-            imp_dialog.setMinimumSize(500, 350)
-            imp_dialog.setStyleSheet("""
-                QDialog { background-color: #fff; color: #000; }
-                QLabel { font-size:13px; color:#000; }
-                QTextEdit { background:#fff; border:1px solid #EAEAEA; border-radius:6px;
-                            padding:8px; font-size:13px; color:#222; }
-                QPushButton { padding:8px 16px; font-size:13px; border-radius:6px; color:#000;
-                              background:#fff; border:1px solid #EAEAEA; }
+            imp_dialog.setWindowTitle("导入术语")
+            imp_dialog.setMinimumSize(520, 380)
+            imp_dialog.setStyleSheet(f"""
+                QDialog {{
+                    background-color: {C.BG_PAGE};
+                    color: {C.TEXT_PRIMARY};
+                }}
+                QLabel {{
+                    font-size: 13px;
+                    color: {C.TEXT_PRIMARY};
+                    border: none; background: transparent;
+                }}
+                QTextEdit {{
+                    background: {C.BG_CARD};
+                    border: 1px solid {C.BORDER};
+                    border-radius: {C.RADIUS_MD};
+                    padding: 10px 14px;
+                    font-size: 13px;
+                    color: {C.TEXT_PRIMARY};
+                }}
+                QTextEdit:focus {{
+                    border-color: {C.PRIMARY};
+                }}
+                QPushButton#primarySmall {{
+                    background: {C.PRIMARY};
+                    color: #FFFFFF;
+                    border: none;
+                    border-radius: {C.RADIUS_MD};
+                    padding: 8px 20px;
+                    font-size: 13px;
+                    font-weight: 600;
+                }}
+                QPushButton#primarySmall:hover {{
+                    background: {C.PRIMARY_HOVER};
+                }}
             """)
-            imp_layout = QVBoxLayout(imp_dialog)
-            imp_layout.setSpacing(8)
-            imp_layout.setContentsMargins(16, 16, 16, 16)
 
-            imp_layout.addWidget(QLabel("粘贴术语，每行一条，格式：原文 → 译文"))
+            imp_card = QFrame()
+            imp_card.setStyleSheet(f"""
+                QFrame {{
+                    background: {C.BG_CARD};
+                    border: 1px solid {C.BORDER_LIGHT};
+                    border-radius: {C.RADIUS_LG};
+                }}
+            """)
+            make_shadow_widget(imp_card, "sm")
+
+            imp_outer = QVBoxLayout(imp_dialog)
+            imp_outer.setContentsMargins(20, 20, 20, 20)
+            imp_outer.addWidget(imp_card)
+
+            imp_layout = QVBoxLayout(imp_card)
+            imp_layout.setSpacing(12)
+            imp_layout.setContentsMargins(24, 24, 24, 24)
+
+            imp_title = QLabel("导入术语")
+            imp_title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 15, QFont.Weight.Bold))
+            imp_title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+            imp_layout.addWidget(imp_title)
+
+            imp_hint = QLabel("每行一条，格式：原文 → 译文")
+            imp_hint.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; border: none; background: transparent;")
+            imp_layout.addWidget(imp_hint)
+
             imp_text = QTextEdit()
-            imp_text.setPlaceholderText("machine learning → 机器学习\nneural network → 神经网络\nthe state of the art → 最先进的\n...")
+            imp_text.setPlaceholderText("machine learning → 机器学习\nneural network → 神经网络\nthe state of the art → 最先进的")
+            imp_text.setMinimumHeight(160)
             imp_layout.addWidget(imp_text)
 
             imp_result = QLabel("")
+            imp_result.setStyleSheet(f"color: {C.SUCCESS}; font-size: 13px; border: none; background: transparent;")
             imp_layout.addWidget(imp_result)
 
             imp_btn_row = QHBoxLayout()
+            imp_btn_row.addStretch()
+
             def do_import_text():
                 pair_key = pair_combo.currentData() or ""
                 if not pair_key:
@@ -936,22 +1721,21 @@ class MainWindow(QMainWindow):
                 sl, tl = parts[0], parts[1] if len(parts) > 1 else ""
                 added, total = import_glossary_from_text(
                     imp_text.toPlainText(), sl, tl)
-                imp_result.setText(f"✅ 导入完成：新增 {added} 条 / 共解析 {total} 条")
+                imp_result.setText(f"导入完成：新增 {added} 条 / 共解析 {total} 条")
                 refresh_table()
 
-            imp_btn = QPushButton("确认导入")
+            imp_btn = QPushButton("  确认导入  ")
+            imp_btn.setObjectName("primarySmall")
+            imp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             imp_btn.clicked.connect(do_import_text)
             imp_btn_row.addWidget(imp_btn)
-            imp_btn_row.addStretch()
             imp_layout.addLayout(imp_btn_row)
 
             imp_dialog.exec()
 
         import_btn.clicked.connect(do_import)
 
-        # 首次加载
         refresh_table()
-
         dialog.exec()
 
 
