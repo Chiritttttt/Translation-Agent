@@ -71,9 +71,48 @@ def clean_subtitle_entry(text: str) -> str:
     text = re.sub(r'\\s\d*', '', text)              # \s 删除线
     text = re.sub(r'\\[xy][\dabcdefABCDEF]{4}', '', text)  # \xNNNN 彩色字符
 
-    # 7. 去除音乐/音效符号
-    for ch in ('♪', '♫', '♩', '♬', '∞'):
+    # 7. 去除音乐/音效符号和音效标注文字
+    for ch in ('♪', '♫', '♩', '♬', '∞', '♭', '♯'):
         text = text.replace(ch, '')
+
+    # 去除方括号/圆括号形式的音效标注：(laughing)、(applause) 等
+    _en_sound_words = (
+        r'laugh|laughs?|laughing|sigh|sighs?|cough|coughs?|cry|cries?|groan|groans?|'
+        r'grunt|grunts?|gasp|gasps?|moan|moans?|scream|screams?|cheer|cheers?|applause|'
+        r'music|song|singing|humming|bell|bells?|ring|ringing|phone|knock|knocking|'
+        r'door|footstep|footsteps?|wind|rain|thunder|explosion|boom|crash|bang|click|'
+        r'clap|claps?|whistle|whistling|heartbeat|breath|breathing|sniff|sniffing?|'
+        r'yawn|yawns?|burp|burps?|hiccup|hiccups?|drum|drums?|guitar|piano|flute|'
+        r'horn|trumpet|violin|siren|alarm|engine|car|train|plane|boat|ship|'
+        r'helicopter|motorcycle|bicycle|horse|bird|birds?|dog|dogs?|cat|cats?|'
+        r'crow|crows?|wolf|wolves?|frog|frogs?|cricket|insect|insects?|baby|babies?|'
+        r'child|children|man|woman|boy|girl|crowd|audience|narrator|voice|voices?|'
+        r'male|female|dub|dubbed|overlap|overlaps?|whisper|whispers?|mumble|mumbles?|'
+        r'shout|shouts?|screaming|roar|roars?|murmur|murmurs?|chant|chants?|'
+        r'hum|hums?|sob|sobs?|weep|weeps?|choke|chokes?'
+    )
+    _en_sound_re = re.compile(r'^(' + _en_sound_words + r')$', re.IGNORECASE)
+
+    _zh_sound_words = (
+        r'音乐|掌声|笑声|哭声|叹气|咳嗽|打嗝|打哈欠|打喷嚏|鼻息|呼吸|呻吟|尖叫声|'
+        r'欢呼声|口哨|铃声|钟声|鼓声|吉他|钢琴|笛子|小号|小提琴|警笛|警报|引擎|'
+        r'风声|雨声|雷声|爆炸|碰撞|敲击|开关|电话|脚步|鸟鸣|狗叫|猫叫|马蹄|婴儿|'
+        r'儿童|旁白|解说|画外音|背景|人群|合唱|诵经|低语|耳语|嘀咕|呐喊|咆哮|呢喃|'
+        r'抽泣|呜咽|吞咽|磨牙|心跳|水声|火声|雨滴|波浪|海浪|电流|静电|机械|电子|'
+        r'数字|信号|提示|警告|警报声|滴滴|嘟嘟|嗡嗡'
+    )
+    _zh_sound_re = re.compile(r'^(' + _zh_sound_words + r')$')
+
+    def _remove_sound_marker(m):
+        content = m.group(1).strip()
+        if not content:
+            return m.group(0)
+        if _en_sound_re.match(content) or _zh_sound_re.match(content):
+            return ''
+        return m.group(0)
+
+    text = re.sub(r'\(([^)]*)\)', _remove_sound_marker, text)
+    text = re.sub(r'\[([^\]]*)\]', _remove_sound_marker, text)
 
     # 8. 去除特殊空白字符
     text = text.replace('\u3000', ' ')  # 全角空格
@@ -317,7 +356,7 @@ class SubtitleEntry:
 class SubtitleFile:
     """字幕文件容器"""
     def __init__(self, format_type="srt", header=""):
-        self.format_type = format_type  # "srt" | "vtt" | "ass"
+        self.format_type = format_type  # "srt" | "vtt" | "ass" | "txt"
         self.entries = []
         self.header = header
 
@@ -609,15 +648,16 @@ def parse_ass(text):
 # ═══════════════════════════════════════════════════════════
 
 def detect_format(text):
-    """根据内容自动检测字幕格式"""
+    """根据内容自动检测字幕格式（含 TXT 纯文本）"""
     first_line = text.strip().split("\n")[0].strip()
     if first_line.startswith("WEBVTT"):
         return "vtt"
     if first_line.startswith("[Script Info]") or "Dialogue:" in text[:2000]:
         return "ass"
-    if re.search(r"\d+\s*\n\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->", text[:1000]):
+    if re.search(r"\d+\s*\n\s*\d{2}:\d{2}:\d{2}[,\.]\d{1,3}\s*-->", text[:1000]):
         return "srt"
-    return "srt"
+    # TXT 纯文本：无时间轴标记、非结构化字幕格式
+    return "txt"
 
 
 def parse_subtitle(text, format_type=None):
@@ -630,8 +670,43 @@ def parse_subtitle(text, format_type=None):
         return parse_vtt(text)
     elif format_type in ("ass", "ssa"):
         return parse_ass(text)
+    elif format_type == "txt":
+        return parse_txt(text)
     else:
         return parse_srt(text)
+
+
+def parse_txt(text):
+    """解析 TXT 纯文本字幕（按行，无时间轴）"""
+    sub = SubtitleFile(format_type="txt")
+    lines = text.strip().split("\n")
+    index = 0
+
+    for line in lines:
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        # 跳过纯标点/符号噪声行
+        if re.match(r'^[\s\.\,\;\:\!\?\-\_\=\+\*\&\^\%\$\#\@\~\`\|\\\/\<\>\(\)\[\]\{\}\'\"\"\u3000-\u303F\uFF00-\uFFEF]+$', cleaned):
+            continue
+        index += 1
+        # TXT 无时间轴，用递增序号模拟（每行 3 秒）
+        start_h = (index * 3) // 3600
+        start_m = ((index * 3) % 3600) // 60
+        start_s = (index * 3) % 60
+        end_ms = (index * 3 + 3) * 1000
+        end_h = end_ms // 3600000
+        end_m = (end_ms % 3600000) // 60000
+        end_s = (end_ms % 60000) // 1000
+
+        sub.entries.append(SubtitleEntry(
+            index=index,
+            start_time=f"{start_h:02d}:{start_m:02d}:{start_s:02d},000",
+            end_time=f"{end_h:02d}:{end_m:02d}:{end_s:02d},000",
+            text=cleaned,
+        ))
+
+    return sub
 
 
 def read_subtitle_file(file_path):
@@ -640,7 +715,7 @@ def read_subtitle_file(file_path):
         text = f.read()
 
     ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-    format_map = {"srt": "srt", "vtt": "vtt", "ass": "ass", "ssa": "ass"}
+    format_map = {"srt": "srt", "vtt": "vtt", "ass": "ass", "ssa": "ass", "txt": "txt"}
     fmt = format_map.get(ext, None)
 
     return parse_subtitle(text, fmt)
