@@ -276,6 +276,52 @@ def clean_subtitle_file(subtitle) -> object:
             merged.append(curr)
         subtitle.entries = merged
 
+    # ── 5.6. 去除相邻条目间的文本重叠（渐进式字幕残余） ──
+    # YouTube 渐进式字幕合并后，相邻条目仍有共享行：
+    #   条目1: "Thank you.\nTonight, I want to start with a simple"
+    #   条目2: "Tonight, I want to start with a simple\nquestion."
+    # 需要去除条目开头与前一条结尾重复的行，只保留新增部分
+    def _fuzzy_eq(a, b):
+        """模糊行比较：去除标点和大小写差异后比较"""
+        def normalize(s):
+            return re.sub(r'[\s\.\,\;\:\!\?\'\"\-\(\)\[\]\{\}]+', '', s).lower()
+        return normalize(a) == normalize(b)
+
+    if len(subtitle.entries) > 1:
+        for i in range(1, len(subtitle.entries)):
+            prev = subtitle.entries[i - 1]
+            curr = subtitle.entries[i]
+            prev_lines = prev.text.strip().split('\n')
+            curr_lines = curr.text.strip().split('\n')
+
+            if not prev_lines or not curr_lines:
+                continue
+
+            # 从前往后找：当前条目开头有多少行与前一条尾部重复
+            overlap = 0
+            for j in range(1, min(len(prev_lines), len(curr_lines)) + 1):
+                curr_prefix = curr_lines[:j]
+                prev_suffix = prev_lines[-j:]
+                matched = True
+                for k in range(j):
+                    if not _fuzzy_eq(curr_prefix[k], prev_suffix[k]):
+                        matched = False
+                        break
+                if matched:
+                    overlap = j
+                else:
+                    break
+
+            if overlap > 0:
+                # 当前条目只保留非重复的新增行
+                curr.text = '\n'.join(curr_lines[overlap:]).strip()
+                if not curr.text:
+                    curr.text = ""
+
+        # 去重后清理产生的空文本条目（将被后续步骤 6 的重叠修复合并）
+        # 但步骤 2 已执行过，需要再清一轮
+        subtitle.entries = [e for e in subtitle.entries if e.text.strip()]
+
     # ── 6. 修复时间重叠（裁剪，确保每条 start >= 上一条 end） ──
     if len(subtitle.entries) > 1:
         for i in range(1, len(subtitle.entries)):
