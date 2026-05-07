@@ -703,7 +703,57 @@ def fetch_url(url):
 
 
 def split_chunks(text, max_chars=8000):
-    """智能分块，兼容中文（按字符数）和英文（按空格分词）。"""
+    """智能分块，兼容中文（按字符数）和英文（按空格分词）。
+
+    PPT 感知：如果文本包含 [幻灯片 N/M] 标记，优先在幻灯片边界断开，
+    避免在一张幻灯片内容中间被切断，导致部分页面丢失译文。
+    """
+    import re
+
+    # ── PPT 幻灯片感知分块 ──
+    slide_pattern = re.compile(r'^\s*\[幻灯片\s+\d+/\d+\]', re.MULTILINE)
+    slide_positions = [m.start() for m in slide_pattern.finditer(text)]
+
+    if len(slide_positions) >= 2:
+        # 文本包含幻灯片标记，按幻灯片边界分块
+        # 每个 slide_positions[i] 是第 i+1 张幻灯片的起始位置
+        boundaries = list(slide_positions) + [len(text)]  # 末尾哨兵
+
+        chunks = []
+        current_start = 0
+        current_length = 0
+
+        for i, boundary in enumerate(boundaries):
+            # 计算当前累积到这个边界的长度
+            segment_length = boundary - current_start
+
+            if current_length + segment_length > max_chars and current_start < boundary:
+                # 超出上限 → 在上一个幻灯片边界处断开
+                # 但如果当前段是第一张幻灯片（current_start == 0），强制包含它
+                if chunks or current_start == 0:
+                    chunks.append(text[current_start:boundary].strip())
+                    current_start = boundary
+                    current_length = 0
+                else:
+                    chunks.append(text[current_start:boundary].strip())
+                    current_start = boundary
+                    current_length = 0
+            else:
+                current_length = boundary - current_start
+
+        # 最后一部分
+        if current_start < len(text):
+            remaining = text[current_start:].strip()
+            if remaining:
+                if chunks and len(chunks[-1]) + len(remaining) < max_chars:
+                    # 最后一段很短，合并到前一个 chunk
+                    chunks[-1] = chunks[-1] + "\n" + remaining
+                else:
+                    chunks.append(remaining)
+
+        return chunks if chunks else [text]
+
+    # ── 通用分块（无幻灯片标记） ──
     # 判断是否以 CJK 字符为主（超过 30%）
     cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
     is_cjk = cjk_count > len(text) * 0.3
@@ -857,12 +907,29 @@ Think and reason entirely in {target_lang}.
     return prompt_full
 
 
+def _has_slide_markers(text):
+    """检测文本是否包含 PPT 幻灯片标记。"""
+    import re
+    return bool(re.search(r'\[幻灯片\s+\d+/\d+\]', text))
+
+
 def step3_draft(source_text, prompt, source_lang, target_lang):
     chunks = split_chunks(source_text)
+    is_ppt = _has_slide_markers(source_text)
+
     subagent_cmd = """Follow all rules in the translation context above.
 Translate this chunk COMPLETELY, every sentence, no omission, no summarization.
 Keep paragraph count similar, preserve format fully. Only output pure translation result.
 """
+
+    if is_ppt:
+        # PPT 模式：强化保留幻灯片标记的指令
+        subagent_cmd += """
+IMPORTANT: This is PPT content. You MUST preserve ALL [幻灯片 N/M] markers exactly as they appear.
+Do NOT omit any markers. Do NOT merge slides. Translate ONLY the text after each marker.
+Every [幻灯片 N/M] line must appear in your output. Output ALL slides, not just the first few.
+"""
+
     if len(chunks) == 1:
         return chat(prompt + "\n" + subagent_cmd, source_text)
     results = []
@@ -872,13 +939,40 @@ Keep paragraph count similar, preserve format fully. Only output pure translatio
     return "\n\n".join(results)
 
 
+def _split_with_slide_awareness(text, max_len=6000):
+    """分段：如果文本包含幻灯片标记，优先在幻灯片边界断开；
+    否则按固定长度截断（兼容旧逻辑）。
+    """
+    if not _has_slide_markers(text):
+        return [text[i:i+max_len] for i in range(0, len(text), max_len)]
+
+    import re
+    slide_pattern = re.compile(r'^\s*\[幻灯片\s+\d+/\d+\]', re.MULTILINE)
+    slide_positions = [m.start() for m in slide_pattern.finditer(text)]
+    if len(slide_positions) < 2:
+        return [text]
+
+    boundaries = list(slide_positions) + [len(text)]
+    chunks = []
+    start = 0
+    for boundary in boundaries:
+        if boundary - start > max_len and start < boundary:
+            if start > 0 or chunks:
+                chunks.append(text[start:boundary].strip())
+                start = boundary
+    if start < len(text):
+        remaining = text[start:].strip()
+        if remaining:
+            chunks.append(remaining)
+    return chunks if chunks else [text]
+
+
 def step4_critique(source_text, draft, analysis, source_lang, target_lang,
                    compact_terms_hint=None):
-    """审校译文 — 长文档分段审校，避免截断。精简模式只传术语。"""
-    # 对长文档进行分段审校
-    max_len = 6000
-    src_chunks = [source_text[i:i+max_len] for i in range(0, len(source_text), max_len)]
-    draft_chunks = [draft[i:i+max_len] for i in range(0, len(draft), max_len)]
+    """审校译文 — 长文档分段审校，避免截断。PPT 感知分块。精简模式只传术语。"""
+    # PPT 感知分段
+    src_chunks = _split_with_slide_awareness(source_text)
+    draft_chunks = _split_with_slide_awareness(draft)
     # 合并对应段进行审校
     pairs = []
     for i in range(max(len(src_chunks), len(draft_chunks))):
@@ -894,9 +988,13 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
     else:
         reference_block = f"分析要点：\n{analysis[:2000]}"
 
+    is_ppt = _has_slide_markers(draft)
     critiques = []
     for idx, (src_part, draft_part) in enumerate(pairs):
         part_label = f"（第 {idx+1}/{len(pairs)} 段）" if len(pairs) > 1 else ""
+        ppt_note = ""
+        if is_ppt:
+            ppt_note = "\n注意：这是 PPT 幻灯片内容，包含 [幻灯片 N/M] 标记。审校时请逐页检查，确保没有遗漏任何一页的译文。"
         critique = chat(
             "你是严格的翻译审校专家。",
             f"""审校{source_lang}→{target_lang}译文{part_label}，输出诊断报告：
@@ -905,7 +1003,7 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
 ## 修辞与情感保真
 ## 表达与逻辑
 ## 总结
-只列出问题，不要自行改写译文原文。
+只列出问题，不要自行改写译文原文。{ppt_note}
 
 原文：\n{src_part}
 译文：\n{draft_part}
@@ -917,32 +1015,38 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
 
 
 def step5_final(draft, critique, target_lang):
-    """终稿润色 — 长文档分段修正，避免超出上下文窗口。"""
-    max_len = 6000
-    draft_chunks = [draft[i:i+max_len] for i in range(0, len(draft), max_len)]
+    """终稿润色 — 长文档分段修正，避免超出上下文窗口。PPT 感知分块。"""
+    draft_chunks = _split_with_slide_awareness(draft)
+    is_ppt = _has_slide_markers(draft)
 
     if len(draft_chunks) <= 1:
+        ppt_instruction = ""
+        if is_ppt:
+            ppt_instruction = "\n注意：这是 PPT 幻灯片内容。你必须保留所有 [幻灯片 N/M] 标记，确保每一页都有对应的译文，不能遗漏任何页面。"
         return chat(
             f"你是{target_lang}母语精修专家，严格依据审校报告逐条修正",
             f"""原文分析、初译草稿、审校问题全部参考上方。
 逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
-只输出最终纯净定稿译文：
+只输出最终纯净定稿译文：{ppt_instruction}
 初译：{draft}
 审校：{critique}"""
         )
 
     # 长文档：逐段修正
     # 将 critique 也分段，确保对应关系
-    critique_chunks = [critique[i:i+max_len] for i in range(0, len(critique), max_len)]
+    critique_chunks = [critique[i:i+6000] for i in range(0, len(critique), 6000)]
     final_parts = []
     for idx, draft_part in enumerate(draft_chunks):
         # 取对应的 critique 段（可能不一一对应，取最后一段作为兜底）
         crit_part = critique_chunks[idx] if idx < len(critique_chunks) else critique_chunks[-1] if critique_chunks else ""
+        ppt_instruction = ""
+        if is_ppt:
+            ppt_instruction = "\n注意：这是 PPT 幻灯片内容的一部分。你必须保留此段中的所有 [幻灯片 N/M] 标记，确保每一页都有对应的译文。"
         result = chat(
             f"你是{target_lang}母语精修专家，严格依据审校报告逐条修正",
             f"""以下是第 {idx+1}/{len(draft_chunks)} 段的修正任务。
 逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
-只输出这一段的最终纯净定稿译文：
+只输出这一段的最终纯净定稿译文：{ppt_instruction}
 初译段落：{draft_part}
 审校参考：{crit_part}"""
         )
