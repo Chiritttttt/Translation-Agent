@@ -2213,6 +2213,59 @@ class MainWindow(QMainWindow):
                     self, "保存", "译文.xlsx", "Excel 文档 (*.xlsx)")
                 if path:
                     wb.save(path)
+            elif fmt in ("pptx", "ppt"):
+                # ── PPT 导出 ──
+                from file_handler import (
+                    export_pptx_translation,
+                    export_pptx_bilingual,
+                )
+                if not self.file_path or not os.path.exists(self.file_path):
+                    # 没有原始 PPT 文件，无法保留格式，提示用户
+                    QMessageBox.warning(
+                        self, "提示",
+                        "导出 PPT 需要原始文件来保留格式。\n"
+                        "请使用「文件」标签页导入原始 PPT 后再翻译导出。\n\n"
+                        "当前可导出为 Word / Excel / TXT 格式。"
+                    )
+                    return
+                original_path = self.file_path
+                default_name = os.path.splitext(os.path.basename(original_path))[0] + "_译文.pptx"
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "保存", default_name, "PowerPoint 文档 (*.pptx)")
+                if not path:
+                    return
+                if not path.lower().endswith(".pptx"):
+                    path += ".pptx"
+                try:
+                    if mode == "bilingual":
+                        # 双语模式：正文保留原文，译文写入备注
+                        export_pptx_bilingual(original_path, self.last_result, path)
+                    else:
+                        # 仅译文模式 / 段落对照：保留格式只换文字
+                        export_pptx_translation(original_path, self.last_result, path)
+                    QMessageBox.information(self, "导出成功", f"PPT 已保存到：\n{path}")
+                except Exception as pptx_err:
+                    raise Exception(f"PPT 导出失败: {pptx_err}")
+            elif fmt == "pdf":
+                # ── PDF 导出 ──
+                from file_handler import (
+                    export_pdf_translation,
+                    export_pdf_bilingual,
+                    export_pdf_paragraph,
+                )
+                default_name = "译文.pdf"
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "保存", default_name, "PDF 文档 (*.pdf)")
+                if not path:
+                    return
+                if not path.lower().endswith(".pdf"):
+                    path += ".pdf"
+                if mode == "bilingual":
+                    export_pdf_bilingual(self.last_source, self.last_result, path)
+                elif mode == "paragraph":
+                    export_pdf_paragraph(self.last_source, self.last_result, path)
+                else:
+                    export_pdf_translation(self.last_result, path)
             else:
                 path, _ = QFileDialog.getSaveFileName(
                     self, "保存", "译文.txt", "文本文件 (*.txt)")
