@@ -462,7 +462,7 @@ def arco_global_stylesheet():
         color: {C.TEXT_PRIMARY};
         font-size: 14px;
         font-weight: 400;
-        background: transparent;
+        background-color: {C.BG_CARD};
         border: none;
         padding: 0;
         margin: 0;
@@ -472,7 +472,13 @@ def arco_global_stylesheet():
     QMessageBox QLabel#qt_msgbox_label {{
         color: {C.TEXT_PRIMARY};
         font-size: 14px;
-        background: transparent;
+        font-weight: 500;
+        background-color: {C.BG_CARD};
+    }}
+    QMessageBox QLabel#qt_msgbox_informativelabel {{
+        color: {C.TEXT_REGULAR};
+        font-size: 13px;
+        background-color: {C.BG_CARD};
     }}
     QMessageBox QPushButton {{
         background: {C.PRIMARY};
@@ -492,23 +498,31 @@ def arco_global_stylesheet():
         background: {C.PRIMARY_ACTIVE};
     }}
 
-    /* ── 对话框 (QDialog) 兜底 ── */
+    /* ── 对话框 (QDialog) ── */
     QDialog {{
         background-color: {C.BG_CARD};
         color: {C.TEXT_PRIMARY};
     }}
     QDialog QLabel {{
         color: {C.TEXT_PRIMARY};
-        background: transparent;
+        background-color: {C.BG_CARD};
     }}
     QDialog QTextEdit {{
         color: {C.TEXT_PRIMARY};
+        background-color: {C.BG_CARD};
     }}
     QDialog QLineEdit {{
         color: {C.TEXT_PRIMARY};
+        background-color: {C.BG_CARD};
     }}
     QDialog QComboBox {{
         color: {C.TEXT_PRIMARY};
+    }}
+    QDialog QComboBox QAbstractItemView {{
+        background-color: {C.BG_ELEVATION};
+        color: {C.TEXT_PRIMARY};
+        selection-background-color: {C.PRIMARY_LIGHT};
+        selection-color: {C.PRIMARY};
     }}
 
     /* ── 文件对话框 ── */
@@ -567,7 +581,61 @@ def arco_global_stylesheet():
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
         width: 0;
     }}
+
+    /* ── 复选框 ── */
+    QCheckBox {{
+        font-size: 14px;
+        color: {C.TEXT_PRIMARY};
+        spacing: 8px;
+        padding: 4px 0;
+    }}
+    QCheckBox::indicator {{
+        width: 16px;
+        height: 16px;
+        border: 2px solid {C.BORDER};
+        border-radius: 3px;
+        background: {C.BG_CARD};
+    }}
+    QCheckBox::indicator:hover {{
+        border-color: {C.PRIMARY_HOVER};
+    }}
+    QCheckBox::indicator:checked {{
+        background: {C.PRIMARY};
+        border-color: {C.PRIMARY};
+    }}
+
+    /* ── 进度条文字 ── */
+    QProgressBar {{
+        color: {C.TEXT_SECONDARY};
+    }}
     """
+
+
+def apply_safe_palette(app):
+    """为 QApplication 设置安全 Palette，防止暗色系统主题下文字不可见。
+
+    在 QSS 被系统原生对话框忽略时（如 QMessageBox、QFileDialog），
+    Palette 作为兜底确保文字清晰可读。
+    """
+    pal = QPalette()
+    # Window / Dialog 背景
+    pal.setColor(QPalette.ColorRole.Window, QColor("#FFFFFF"))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor("#1D2129"))
+    # Button
+    pal.setColor(QPalette.ColorRole.Button, QColor("#FFFFFF"))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor("#4E5969"))
+    # Text / Base
+    pal.setColor(QPalette.ColorRole.Text, QColor("#1D2129"))
+    pal.setColor(QPalette.ColorRole.Base, QColor("#FFFFFF"))
+    # Highlight
+    pal.setColor(QPalette.ColorRole.Highlight, QColor("#165DFF"))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#FFFFFF"))
+    # Tooltip
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#FFFFFF"))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#1D2129"))
+    # Placeholder
+    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#C9CDD4"))
+    app.setPalette(pal)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1725,7 +1793,11 @@ class MainWindow(QMainWindow):
         self.sub_file_preview = QTextEdit()
         self.sub_file_preview.setReadOnly(True)
         self.sub_file_preview.setPlaceholderText("导入后此处显示清洗后的 SRT 文件内容...")
-        self.sub_file_preview.setStyleSheet("font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;")
+        # 使用 QFont 而非 setStyleSheet，避免覆盖全局样式导致边框/背景丢失
+        _mono_font = QFont("Consolas, Courier New, monospace")
+        _mono_font.setStyleHint(QFont.StyleHint.Monospace)
+        _mono_font.setPointSize(13)
+        self.sub_file_preview.setFont(_mono_font)
         self.sub_preview_tabs.addTab(self.sub_file_preview, "  清洗后文件  ")
         self.sub_preview_tabs.setMinimumHeight(120)
         sl_layout.addWidget(self.sub_preview_tabs)
@@ -3027,6 +3099,8 @@ class MainWindow(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    # 安全 Palette：防止暗色系统主题下弹窗文字不可见
+    apply_safe_palette(app)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
