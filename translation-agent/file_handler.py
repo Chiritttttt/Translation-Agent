@@ -171,15 +171,74 @@ def read_docx(file_path):
 
 
 def read_pptx(file_path):
+    """读取 PPTX，按幻灯片逐页提取文本，保留结构标记。
+
+    输出格式：
+        [翻译说明] 以下为PPT幻灯片逐页内容...
+        [幻灯片 1/N]
+        标题文本
+        正文行1
+        正文行2
+        [幻灯片 2/N]
+        ...
+
+    支持识别：标题、正文、表格、组合形状、SmartArt。
+    """
     try:
         from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
         prs = Presentation(file_path)
-        text = ""
-        for slide in prs.slides:
+        total = len(prs.slides)
+        parts = []
+
+        # AI 翻译说明行，告诉 AI 保留标记
+        parts.append(
+            "[翻译说明] 以下为PPT幻灯片逐页内容。"
+            "请保留所有 [幻灯片 N/M] 标记，只翻译标记后的文字。"
+            "标题保持简洁有力，正文翻译准确流畅。"
+        )
+        parts.append("")
+
+        for idx, slide in enumerate(prs.slides, 1):
+            title_text = ""
+            body_lines = []
+
             for shape in slide.shapes:
-                if hasattr(shape, "text") and shape.text.strip():
-                    text += shape.text + "\n\n"
-        return text.strip()
+                # ── 组合形状 / SmartArt ──
+                if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+                    body_lines.extend(_extract_group_text(shape))
+                    continue
+
+                # ── 表格 ──
+                if shape.has_table:
+                    body_lines.extend(_extract_table_text(shape.table))
+                    continue
+
+                # ── 文本框 ──
+                if shape.has_text_frame:
+                    shape_text = shape.text.strip()
+                    if not shape_text:
+                        continue
+
+                    if _is_title_shape(shape):
+                        title_text = shape_text
+                    else:
+                        for para in shape.text_frame.paragraphs:
+                            t = para.text.strip()
+                            if t:
+                                body_lines.append(t)
+
+            # 跳过完全空白的幻灯片（纯图片页等）
+            if title_text or body_lines:
+                parts.append(f"[幻灯片 {idx}/{total}]")
+                if title_text:
+                    parts.append(title_text)
+                parts.extend(body_lines)
+                parts.append("")  # 空行分隔各页
+
+        return "\n".join(parts).strip()
+
     except Exception as e:
         raise Exception(f"PPTX读取失败: {e}")
 
@@ -424,50 +483,353 @@ def export_docx_bilingual(original, translated, output_path, original_path=None)
     doc.save(output_path)
 
 
-# ─── 导出 PPTX ───────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════
+# PPT 辅助函数
+# ═══════════════════════════════════════════════════════════
 
-def export_pptx_translation(original_path, translated, output_path):
-    """全译文：保留格式只换文字"""
-    from pptx import Presentation
-    prs = Presentation(original_path)
-    trans_lines = [l for l in translated.split("\n") if l.strip()
-                   and not (l.startswith("[幻灯片") and l.endswith("]"))]
-    line_idx = 0
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
+def _is_title_shape(shape):
+    """判断 shape 是否为标题占位符"""
+    try:
+        if not hasattr(shape, "placeholder_format") or shape.placeholder_format is None:
+            return False
+        from pptx.enum.shapes import PP_PLACEHOLDER
+        ph_type = shape.placeholder_format.type
+        # TITLE (1), SUBTITLE (2), CENTER_TITLE (3), TITLE_2 (7)
+        return ph_type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.SUBTITLE,
+                           PP_PLACEHOLDER.CENTER_TITLE, PP_PLACEHOLDER.TITLE_2)
+    except Exception:
+        return False
+
+
+def _extract_group_text(group_shape):
+    """递归提取组合形状 / SmartArt 中的文本"""
+    lines = []
+    try:
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        for child in group_shape.shapes:
+            if child.shape_type == MSO_SHAPE_TYPE.GROUP:
+                lines.extend(_extract_group_text(child))
+            elif child.has_text_frame:
+                for para in child.text_frame.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        lines.append(t)
+            elif child.has_table:
+                lines.extend(_extract_table_text(child.table))
+    except Exception:
+        pass
+    return lines
+
+
+def _extract_table_text(table):
+    """提取 PPT 表格中的文本，按行列输出"""
+    lines = []
+    try:
+        for row in table.rows:
+            row_cells = []
+            for cell in row.cells:
+                t = cell.text.strip()
+                row_cells.append(t if t else "")
+            lines.append(" | ".join(row_cells))
+    except Exception:
+        pass
+    return lines
+
+
+def _collect_slide_paragraphs(slide):
+    """收集单张幻灯片中所有有文本的段落及其所属 shape 信息。
+
+    Returns:
+        list of dict: [
+            {"shape": shape, "para": para, "is_title": bool, "text": str},
+            ...
+        ]
+    """
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    result = []
+
+    for shape in slide.shapes:
+        # 组合形状：递归收集
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            for item in _collect_group_paragraphs(shape):
+                result.append(item)
+            continue
+
+        # 表格：按单元格收集
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    for para in cell.text_frame.paragraphs:
+                        if para.text.strip():
+                            result.append({
+                                "shape": shape,
+                                "para": para,
+                                "is_title": False,
+                                "text": para.text.strip(),
+                                "is_table_cell": True,
+                            })
+            continue
+
+        # 文本框
+        if shape.has_text_frame:
+            is_title = _is_title_shape(shape)
             for para in shape.text_frame.paragraphs:
                 if para.text.strip():
-                    new_text = trans_lines[line_idx] if line_idx < len(trans_lines) else ""
-                    line_idx += 1
-                    if para.runs:
-                        para.runs[0].text = new_text
-                        for run in para.runs[1:]:
-                            run.text = ""
+                    result.append({
+                        "shape": shape,
+                        "para": para,
+                        "is_title": is_title,
+                        "text": para.text.strip(),
+                        "is_table_cell": False,
+                    })
+
+    return result
+
+
+def _collect_group_paragraphs(group_shape):
+    """递归收集组合形状中的段落"""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    result = []
+    try:
+        for child in group_shape.shapes:
+            if child.shape_type == MSO_SHAPE_TYPE.GROUP:
+                result.extend(_collect_group_paragraphs(child))
+            elif child.has_text_frame:
+                for para in child.text_frame.paragraphs:
+                    if para.text.strip():
+                        result.append({
+                            "shape": child,
+                            "para": para,
+                            "is_title": False,
+                            "text": para.text.strip(),
+                            "is_table_cell": False,
+                        })
+    except Exception:
+        pass
+    return result
+
+
+def _parse_translated_slides(text):
+    """将 AI 译文按 [幻灯片 N/M] 标记解析为逐页内容。
+
+    Returns:
+        dict: {slide_number: [translated_lines]}
+        如果没有标记，返回 {1: [all_lines]}（兼容旧格式）
+    """
+    import re
+    slides = {}
+    current_slide = None
+    current_lines = []
+
+    for line in text.split("\n"):
+        # 跳过翻译说明行
+        if line.startswith("[翻译说明]") or line.startswith("[翻译说明]"):
+            continue
+
+        # 匹配幻灯片标记（兼容多种空格写法）
+        m = re.match(r'^\s*\[幻灯片\s+(\d+)', line)
+        if m:
+            # 保存上一页
+            if current_slide is not None:
+                slides[current_slide] = [l for l in current_lines if l.strip()]
+            current_slide = int(m.group(1))
+            current_lines = []
+            continue
+
+        if current_slide is not None:
+            current_lines.append(line.strip())
+
+    # 最后一页
+    if current_slide is not None:
+        slides[current_slide] = [l for l in current_lines if l.strip()]
+
+    # 兼容：没有标记的纯文本，全部作为第 1 页
+    if not slides:
+        all_lines = [l.strip() for l in text.split("\n") if l.strip()
+                     and not l.startswith("[翻译说明]")]
+        if all_lines:
+            slides[1] = all_lines
+
+    return slides
+
+
+def _replace_para_text(para, new_text):
+    """替换段落文本，保留第一个 run 的格式。"""
+    if para.runs:
+        para.runs[0].text = new_text
+        for run in para.runs[1:]:
+            run.text = ""
+    else:
+        para.text = new_text
+
+
+def _split_title_and_body(lines):
+    """从译文行列表中分离标题和正文。
+
+    规则：第一行短文本（≤60字符）视为标题，其余为正文。
+    如果只有一行，不区分。
+    """
+    if not lines:
+        return "", []
+    if len(lines) == 1:
+        return lines[0], []
+    # 第一行较短 → 视为标题
+    if len(lines[0]) <= 60:
+        return lines[0], lines[1:]
+    return "", lines
+
+
+# ═══════════════════════════════════════════════════════════
+# PPT 导出函数
+# ═══════════════════════════════════════════════════════════
+
+def export_pptx_translation(original_path, translated, output_path):
+    """全译文模式：保留格式，按页对位替换文字。
+
+    逻辑：
+    1. 解析译文中的 [幻灯片 N] 标记，得到逐页译文
+    2. 遍历原始 PPT 每张幻灯片，收集段落
+    3. 用 match_translation() 按页对位（比例匹配，防止错位）
+    4. 替换文本，保留第一个 run 的格式
+    """
+    from pptx import Presentation
+
+    trans_slides = _parse_translated_slides(translated)
+    prs = Presentation(original_path)
+
+    for slide_idx, slide in enumerate(prs.slides, 1):
+        # 收集原始段落
+        orig_paras = _collect_slide_paragraphs(slide)
+        if not orig_paras:
+            continue
+
+        # 获取对应页的译文行
+        trans_lines = trans_slides.get(slide_idx, [])
+
+        # 分离标题和正文
+        orig_titles = [p["text"] for p in orig_paras if p["is_title"]]
+        orig_bodies = [p["text"] for p in orig_paras if not p["is_title"]]
+
+        trans_title, trans_body_lines = _split_title_and_body(trans_lines)
+
+        # ── 标题替换 ──
+        title_paras = [p for p in orig_paras if p["is_title"]]
+        if trans_title and title_paras:
+            _replace_para_text(title_paras[0]["para"], trans_title)
+
+        # ── 正文替换：按比例对位 ──
+        body_paras = [p for p in orig_paras if not p["is_title"]]
+        if body_paras and trans_body_lines:
+            matched = match_translation(orig_bodies, "\n".join(trans_body_lines))
+            for i, bp in enumerate(body_paras):
+                if i < len(matched):
+                    _replace_para_text(bp["para"], matched[i])
+
     prs.save(output_path)
 
 
 def export_pptx_bilingual(original_path, translated, output_path):
-    """备注栏对照：正文保留原文，译文写入备注"""
+    """双语备注模式：正文保留原文，译文写入演讲者备注栏。"""
     from pptx import Presentation
+
+    trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
-    trans_lines = [l for l in translated.split("\n") if l.strip()
-                   and not (l.startswith("[幻灯片") and l.endswith("]"))]
-    line_idx = 0
-    for slide in prs.slides:
-        slide_trans = []
-        for shape in slide.shapes:
-            if shape.has_text_frame:
-                for para in shape.text_frame.paragraphs:
-                    if para.text.strip():
-                        t = trans_lines[line_idx] if line_idx < len(trans_lines) else ""
-                        slide_trans.append(t)
-                        line_idx += 1
-        if slide_trans:
+
+    for slide_idx, slide in enumerate(prs.slides, 1):
+        trans_lines = trans_slides.get(slide_idx, [])
+        if not trans_lines:
+            continue
+
+        # 写入备注
+        try:
             notes = slide.notes_slide
-            notes.notes_text_frame.text = "【译文】\n" + "\n".join(slide_trans)
+        except Exception:
+            slide.notes_slide  # 创建备注页
+            notes = slide.notes_slide
+
+        trans_title, trans_body = _split_title_and_body(trans_lines)
+        notes_text = "【译文】\n"
+        if trans_title:
+            notes_text += f"标题：{trans_title}\n"
+        notes_text += "\n".join(trans_body) if trans_body else "（无正文内容）"
+        notes.notes_text_frame.text = notes_text
+
     prs.save(output_path)
+
+
+def export_pptx_bilingual_inline(original_path, translated, output_path):
+    """行内双语模式：在每个文本框中，原文下方追加译文行。
+
+    视觉效果：
+    ┌─────────────────────┐
+    │ Original Text       │
+    │ 原文翻译            │
+    └─────────────────────┘
+
+    使用 run 级别操作，保留原文格式，译文使用较小字号 + 灰色。
+    """
+    from pptx import Presentation
+    from pptx.util import Pt
+    from pptx.dml.color import RGBColor
+
+    trans_slides = _parse_translated_slides(translated)
+    prs = Presentation(original_path)
+
+    for slide_idx, slide in enumerate(prs.slides, 1):
+        trans_lines = trans_slides.get(slide_idx, [])
+        if not trans_lines:
+            continue
+
+        trans_title, trans_body_lines = _split_title_and_body(trans_lines)
+
+        # 收集原始段落
+        orig_paras = _collect_slide_paragraphs(slide)
+        if not orig_paras:
+            continue
+
+        body_paras = [p for p in orig_paras if not p["is_title"]]
+        orig_bodies = [p["text"] for p in body_paras]
+
+        # 按比例对位
+        if body_paras and trans_body_lines:
+            matched = match_translation(orig_bodies, "\n".join(trans_body_lines))
+
+            for i, bp in enumerate(body_paras):
+                if i < len(matched) and matched[i]:
+                    _append_translation_run(bp["para"], matched[i])
+
+        # 标题：在标题段落后追加译文
+        title_paras = [p for p in orig_paras if p["is_title"]]
+        if trans_title and title_paras:
+            _append_translation_run(title_paras[0]["para"], trans_title)
+
+    prs.save(output_path)
+
+
+def _append_translation_run(para, translated_text):
+    """在段落后追加一个译文 run，使用较小字号 + 灰色。"""
+    try:
+        from pptx.util import Pt
+        from pptx.dml.color import RGBColor
+
+        # 获取原文 run 的字号作为参考
+        ref_size = 10
+        if para.runs:
+            try:
+                ref_size = para.runs[0].font.size.pt if para.runs[0].font.size else 10
+            except Exception:
+                pass
+
+        # 添加换行 + 译文 run
+        run = para.add_run()
+        run.text = "\n" + translated_text
+        try:
+            run.font.size = Pt(max(ref_size - 2, 6))
+            run.font.color.rgb = RGBColor(0x4E, 0x59, 0x69)  # Arco TEXT_REGULAR
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 # ─── 导出 Excel ──────────────────────────────────────────

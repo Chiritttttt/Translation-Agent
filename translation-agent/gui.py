@@ -1358,14 +1358,26 @@ class ExportDialog(QDialog):
         self.mode_group = QButtonGroup()
         mode_grid = QVBoxLayout()
         mode_grid.setSpacing(6)
-        for mode, label in [
-            ("paragraph", "段落对照模式（推荐）"),
-            ("bilingual", "行对照模式（原文+译文）"),
-            ("translation", "仅译文模式"),
-        ]:
+
+        # 根据文件类型动态生成导出模式选项
+        if file_type in ("pptx", "ppt"):
+            mode_options = [
+                ("translation", "替换译文（保留格式，原文替换为译文）"),
+                ("bilingual_notes", "双语备注（正文原文，译文写入备注栏）"),
+                ("bilingual_inline", "行内双语（每个文本框内原文+译文并排）"),
+            ]
+        else:
+            mode_options = [
+                ("paragraph", "段落对照模式（推荐）"),
+                ("bilingual", "行对照模式（原文+译文）"),
+                ("translation", "仅译文模式"),
+            ]
+
+        default_mode = mode_options[0][0]
+        for mode, label in mode_options:
             rb = QRadioButton(label)
             rb.setProperty("val", mode)
-            if mode == "paragraph":
+            if mode == default_mode:
                 rb.setChecked(True)
             self.mode_group.addButton(rb)
             mode_grid.addWidget(rb)
@@ -2214,13 +2226,14 @@ class MainWindow(QMainWindow):
                 if path:
                     wb.save(path)
             elif fmt in ("pptx", "ppt"):
-                # ── PPT 导出 ──
+                # ── PPT 导出（优化版：按页对位） ──
                 from file_handler import (
                     export_pptx_translation,
                     export_pptx_bilingual,
+                    export_pptx_bilingual_inline,
                 )
                 if not self.file_path or not os.path.exists(self.file_path):
-                    # 没有原始 PPT 文件，无法保留格式，提示用户
+                    # 没有原始 PPT 文件，无法保留格式
                     QMessageBox.warning(
                         self, "提示",
                         "导出 PPT 需要原始文件来保留格式。\n"
@@ -2237,11 +2250,14 @@ class MainWindow(QMainWindow):
                 if not path.lower().endswith(".pptx"):
                     path += ".pptx"
                 try:
-                    if mode == "bilingual":
-                        # 双语模式：正文保留原文，译文写入备注
+                    if mode == "bilingual_notes":
+                        # 双语备注模式：正文保留原文，译文写入备注栏
                         export_pptx_bilingual(original_path, self.last_result, path)
+                    elif mode == "bilingual_inline":
+                        # 行内双语模式：原文下方追加译文
+                        export_pptx_bilingual_inline(original_path, self.last_result, path)
                     else:
-                        # 仅译文模式 / 段落对照：保留格式只换文字
+                        # 替换译文模式：保留格式只换文字
                         export_pptx_translation(original_path, self.last_result, path)
                     QMessageBox.information(self, "导出成功", f"PPT 已保存到：\n{path}")
                 except Exception as pptx_err:
