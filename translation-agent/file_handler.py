@@ -609,6 +609,95 @@ def _collect_group_paragraphs(group_shape):
     return result
 
 
+def _reconstruct_slide_markers(original_path, translated_text):
+    """如果 AI 译文丢失了 [幻灯片 N/M] 标记，根据原始 PPT 结构自动重建。
+
+    这是最后一道防线：即使 AI 在翻译/审校/终稿步骤中丢掉了标记，
+    导出时也能根据原始 PPT 的页面结构，按比例将译文分配到每一页。
+
+    Returns:
+        str: 带有 [幻灯片 N/M] 标记的译文文本
+    """
+    import re
+
+    # 已有标记，无需处理
+    if re.search(r'\[幻灯片\s+\d+/\d+\]', translated_text):
+        return translated_text
+
+    # 读取原始 PPT 的文本结构
+    try:
+        source_text = read_pptx(original_path)
+    except Exception:
+        return translated_text
+
+    # 解析原文的幻灯片结构：每页有多少行内容
+    structure = []  # [(slide_num, total_slides, content_line_count)]
+    lines = source_text.split("\n")
+    current_slide = None
+    total_slides = 0
+    content_count = 0
+
+    for line in lines:
+        m = re.match(r'^\s*\[幻灯片\s+(\d+)/(\d+)\]', line)
+        if m:
+            if current_slide is not None:
+                structure.append((current_slide, total_slides, content_count))
+            current_slide = int(m.group(1))
+            total_slides = int(m.group(2))
+            content_count = 0
+        elif line.strip() and not line.startswith("[翻译说明]"):
+            content_count += 1
+
+    if current_slide is not None:
+        structure.append((current_slide, total_slides, content_count))
+
+    if not structure:
+        return translated_text
+
+    # 统计原文总内容行数
+    total_content = sum(s[2] for s in structure)
+    if total_content == 0:
+        # 所有页面都是空白的，均匀分配
+        total_content = len(structure)
+
+    # 提取译文的非空行
+    trans_lines = [l.strip() for l in translated_text.split("\n")
+                   if l.strip()
+                   and not l.startswith("[翻译说明]")
+                   and not re.match(r'^\s*\[幻灯片', l)]
+
+    if not trans_lines:
+        return translated_text
+
+    # 按比例将译文行分配到每一页
+    result_parts = []
+    trans_idx = 0
+
+    for i, (slide_num, total, orig_count) in enumerate(structure):
+        # 计算这一页应分配多少行译文
+        if orig_count == 0:
+            expected = max(1, len(trans_lines) // len(structure))
+        else:
+            proportion = orig_count / total_content
+            expected = max(1, round(proportion * len(trans_lines)))
+
+        # 最后一页：把剩余行全部给最后一页
+        if i == len(structure) - 1:
+            expected = len(trans_lines) - trans_idx
+
+        # 取译文行
+        end_idx = min(trans_idx + expected, len(trans_lines))
+        slide_content = trans_lines[trans_idx:end_idx]
+
+        result_parts.append(f"[幻灯片 {slide_num}/{total}]")
+        result_parts.extend(slide_content)
+        result_parts.append("")
+
+        trans_idx = end_idx
+
+    return "\n".join(result_parts)
+
+
 def _parse_translated_slides(text):
     """将 AI 译文按 [幻灯片 N/M] 标记解析为逐页内容。
 
@@ -687,6 +776,7 @@ def export_pptx_translation(original_path, translated, output_path):
     """全译文模式：保留格式，按页对位替换文字。
 
     逻辑：
+    0. 兜底：如果 AI 丢失了幻灯片标记，根据原始 PPT 结构重建
     1. 解析译文中的 [幻灯片 N] 标记，得到逐页译文
     2. 遍历原始 PPT 每张幻灯片，收集段落
     3. 用 match_translation() 按页对位（比例匹配，防止错位）
@@ -694,6 +784,8 @@ def export_pptx_translation(original_path, translated, output_path):
     """
     from pptx import Presentation
 
+    # 兜底：确保译文中有幻灯片标记
+    translated = _reconstruct_slide_markers(original_path, translated)
     trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
 
@@ -732,6 +824,8 @@ def export_pptx_bilingual(original_path, translated, output_path):
     """双语备注模式：正文保留原文，译文写入演讲者备注栏。"""
     from pptx import Presentation
 
+    # 兜底：确保译文中有幻灯片标记
+    translated = _reconstruct_slide_markers(original_path, translated)
     trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
 
@@ -772,6 +866,8 @@ def export_pptx_bilingual_inline(original_path, translated, output_path):
     from pptx.util import Pt
     from pptx.dml.color import RGBColor
 
+    # 兜底：确保译文中有幻灯片标记
+    translated = _reconstruct_slide_markers(original_path, translated)
     trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
 
