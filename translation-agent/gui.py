@@ -1075,6 +1075,14 @@ class SubtitleWorker(QThread):
         self.style = style or ""
         self.audience = audience or ""
         self.compact = compact
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def _check_cancel(self):
+        if self._cancelled:
+            raise InterruptedError("翻译已取消")
 
     # ── 第一步：AI 分析字幕内容 ──
     def _step_analyze(self, source_text):
@@ -1307,6 +1315,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
 
             # ── 第一步：深度分析 ──
             self.progress.emit("第一步：深度分析字幕内容...", 1)
+            self._check_cancel()
             analysis = self._step_analyze(source_text)
             self.analysis_done.emit(analysis)
 
@@ -1327,10 +1336,12 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
 
             # ── 第二步：组装提示 ──
             self.progress.emit("第二步：组装翻译提示...", 2)
+            self._check_cancel()
             prompt = self._step_build_prompt(analysis, compact_analysis)
 
             # ── 第三步：初译 ──
             self.progress.emit("第三步：初译字幕...", 3)
+            self._check_cancel()
             all_translated = self._step_translate(prompt)
 
             # 构建完整译文文本（用于审校）
@@ -1339,11 +1350,13 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
 
             # ── 第四步：审校（全文分段，精简模式只传术语） ──
             self.progress.emit("第四步：审校译文...", 4)
+            self._check_cancel()
             critique = self._step_critique(source_text, draft_text, analysis, terms_hint)
             self.critique_done.emit(critique)
 
             # ── 第五步：终稿润色 ──
             self.progress.emit("第五步：终稿润色...", 5)
+            self._check_cancel()
             final_text = self._step_final(draft_text, critique)
 
             # 将终稿结果重新应用到字幕对象
@@ -1354,9 +1367,14 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
             self.progress.emit("字幕翻译完成！", 5)
             self.finished.emit(self.subtitle, final_translated)
 
+        except InterruptedError:
+            self.progress.emit("已取消翻译", 0)
         except Exception as e:
-            logger.exception("字幕翻译异常")
-            self.error.emit(str(e))
+            if self._cancelled:
+                self.progress.emit("已取消翻译", 0)
+            else:
+                logger.exception("字幕翻译异常")
+                self.error.emit(str(e))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1378,10 +1396,19 @@ class TranslateWorker(QThread):
         self.style = style
         self.audience = audience
         self.compact = compact
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def _check_cancel(self):
+        if self._cancelled:
+            raise InterruptedError("翻译已取消")
 
     def run(self):
         try:
             self.progress.emit("第一步：深度分析...", 1)
+            self._check_cancel()
             analysis = step1_analyze(self.source_text, self.source_lang,
                                      self.target_lang, self.audience, self.style)
             self.analysis_done.emit(analysis)
@@ -1401,16 +1428,19 @@ class TranslateWorker(QThread):
                 terms_hint = get_glossary_prompt_block(self.source_lang, self.target_lang)
 
             self.progress.emit("第二步：组装提示...", 2)
+            self._check_cancel()
             prompt = step2_build_prompt(
                 analysis if not self.compact else None,
                 self.source_lang, self.target_lang, self.audience, self.style,
                 compact_analysis=compact_analysis)
 
             self.progress.emit("第三步：初译...", 3)
+            self._check_cancel()
             draft = step3_draft(self.source_text, prompt,
                                 self.source_lang, self.target_lang)
 
             self.progress.emit("第四步：审校...", 4)
+            self._check_cancel()
             critique = step4_critique(
                 self.source_text, draft, analysis,
                 self.source_lang, self.target_lang,
@@ -1418,11 +1448,17 @@ class TranslateWorker(QThread):
             self.critique_done.emit(critique)
 
             self.progress.emit("第五步：终稿润色...", 5)
+            self._check_cancel()
             final = step5_final(draft, critique, self.target_lang)
             self.finished.emit(final)
 
+        except InterruptedError:
+            self.progress.emit("已取消翻译", 0)
         except Exception as e:
-            self.error.emit(str(e))
+            if self._cancelled:
+                self.progress.emit("已取消翻译", 0)
+            else:
+                self.error.emit(str(e))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1431,139 +1467,180 @@ class TranslateWorker(QThread):
 class ExportDialog(QDialog):
     def __init__(self, parent, file_type):
         super().__init__(parent)
-        self.setWindowTitle("导出设置")
-        self.setMinimumWidth(360)
-        self.setMinimumHeight(420)
+        self.setWindowTitle("导出译文")
+        self.setFixedSize(520, 480)
         C = ArcoColors
         self.setStyleSheet(f"""
             QDialog {{
                 background-color: {C.BG_PAGE};
                 color: {C.TEXT_PRIMARY};
             }}
-            QLabel {{
-                font-size: 14px;
-                color: {C.TEXT_PRIMARY};
-                font-weight: 600;
-            }}
-            QRadioButton {{
-                font-size: 14px;
-                color: {C.TEXT_PRIMARY};
-                spacing: 8px;
-                padding: 7px 12px;
-                border-radius: {C.RADIUS_MD};
-                background: {C.BG_CARD};
-                border: 1px solid {C.BORDER_LIGHT};
-            }}
-            QRadioButton:hover {{
-                border-color: {C.PRIMARY_HOVER};
-                background: {C.PRIMARY_LIGHT2};
-            }}
-            QRadioButton::indicator {{
-                width: 16px;
-                height: 16px;
-                border: 2px solid {C.BORDER};
-                border-radius: 50%;
-                background: {C.BG_CARD};
-            }}
-            QRadioButton::indicator:checked {{
-                border: 5px solid {C.PRIMARY};
-            }}
-            QPushButton {{
-                background: {C.PRIMARY};
-                color: #FFFFFF;
-                border: none;
-                border-radius: {C.RADIUS_MD};
-                padding: 10px 24px;
-                font-size: 14px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background: {C.PRIMARY_HOVER};
-            }}
         """)
 
-        card = QFrame()
-        card.setStyleSheet(f"""
-            QFrame {{
-                background: {C.BG_CARD};
-                border: 1px solid {C.BORDER_LIGHT};
-                border-radius: {C.RADIUS_LG};
-                padding: 24px;
-            }}
-        """)
-        make_shadow_widget(card, "md")
-        card_layout = QVBoxLayout(card)
-        card_layout.setSpacing(16)
-        card_layout.setContentsMargins(24, 24, 24, 24)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(0)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
-        outer.addWidget(card)
+        # ── 标题区 ──
+        title_bar = QHBoxLayout()
+        title_bar.setSpacing(8)
+        title_icon = QLabel("↓")
+        title_icon.setStyleSheet(f"color: {C.PRIMARY}; font-size: 20px; font-weight: 700; background: transparent; border: none;")
+        title_bar.addWidget(title_icon)
+        title_label = QLabel("导出译文")
+        title_label.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
+        title_bar.addWidget(title_label)
+        title_bar.addStretch()
+        main_layout.addLayout(title_bar)
+        main_layout.addSpacing(16)
 
-        card_layout.addWidget(QLabel("导出格式"))
+        # ── 导出格式区 ──
+        fmt_section = QFrame()
+        fmt_section.setStyleSheet(f"background: {C.BG_CARD}; border: 1px solid {C.BORDER_LIGHT}; border-radius: {C.RADIUS_MD};")
+        fmt_layout = QVBoxLayout(fmt_section)
+        fmt_layout.setContentsMargins(16, 14, 16, 14)
+        fmt_layout.setSpacing(8)
+
+        fmt_header = QLabel("选择导出格式")
+        fmt_header.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
+        fmt_layout.addWidget(fmt_header)
 
         self.fmt_group = QButtonGroup()
-        fmt_options = {
-            "pdf": "PDF",
-            "docx": "Word (.docx)",
-            "doc": "Word (.doc)",
-            "xlsx": "Excel (.xlsx)",
-            "xls": "Excel (.xls)",
-            "pptx": "PowerPoint (.pptx)",
-            "ppt": "PowerPoint (.ppt)",
-        }
-        default_fmt = file_type if file_type in fmt_options else "docx"
-        fmt_grid = QVBoxLayout()
+        fmt_options = [
+            ("pdf",   "PDF 文档"),
+            ("docx",  "Word 文档 (.docx)"),
+            ("xlsx",  "Excel 表格 (.xlsx)"),
+            ("pptx",  "PowerPoint 演示文稿 (.pptx)"),
+        ]
+        # 如果原始文件不是特殊类型，默认 Word
+        default_fmt = file_type if file_type in [f[0] for f in fmt_options] else "docx"
+
+        fmt_grid = QGridLayout()
         fmt_grid.setSpacing(6)
-        for fmt, label in fmt_options.items():
+        for idx, (fmt, label) in enumerate(fmt_options):
             rb = QRadioButton(label)
             rb.setProperty("val", fmt)
             if fmt == default_fmt:
                 rb.setChecked(True)
+            rb.setStyleSheet(f"""
+                QRadioButton {{
+                    font-size: 13px; color: {C.TEXT_PRIMARY};
+                    spacing: 6px; padding: 6px 10px;
+                    border-radius: 6px; background: {C.BG_PAGE};
+                    border: 1px solid {C.BORDER_LIGHT};
+                }}
+                QRadioButton:hover {{ border-color: {C.PRIMARY_HOVER}; background: {C.PRIMARY_LIGHT2}; }}
+                QRadioButton::indicator {{ width: 14px; height: 14px; border: 2px solid {C.BORDER}; border-radius: 50%; background: {C.BG_CARD}; }}
+                QRadioButton::indicator:checked {{ border: 4px solid {C.PRIMARY}; }}
+            """)
             self.fmt_group.addButton(rb)
-            fmt_grid.addWidget(rb)
-        card_layout.addLayout(fmt_grid)
+            fmt_grid.addWidget(rb, idx // 2, idx % 2)
+        fmt_layout.addLayout(fmt_grid)
+        main_layout.addWidget(fmt_section)
+        main_layout.addSpacing(12)
 
-        card_layout.addWidget(make_h_line())
-        card_layout.addWidget(QLabel("导出模式"))
+        # ── 导出模式区 ──
+        mode_section = QFrame()
+        mode_section.setStyleSheet(f"background: {C.BG_CARD}; border: 1px solid {C.BORDER_LIGHT}; border-radius: {C.RADIUS_MD};")
+        mode_layout = QVBoxLayout(mode_section)
+        mode_layout.setContentsMargins(16, 14, 16, 14)
+        mode_layout.setSpacing(8)
+
+        mode_header = QLabel("选择导出模式")
+        mode_header.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
+        mode_layout.addWidget(mode_header)
 
         self.mode_group = QButtonGroup()
-        mode_grid = QVBoxLayout()
-        mode_grid.setSpacing(6)
 
-        # 根据文件类型动态生成导出模式选项
         if file_type in ("pptx", "ppt"):
             mode_options = [
-                ("translation", "替换译文（保留格式，原文替换为译文）"),
-                ("bilingual_notes", "双语备注（正文原文，译文写入备注栏）"),
-                ("bilingual_inline", "行内双语（每个文本框内原文+译文并排）"),
+                ("translation",       "替换译文", "保留原始格式，将每页原文替换为对应译文"),
+                ("bilingual_notes",   "双语备注", "正文保持原文，译文写入演讲者备注栏"),
+                ("bilingual_inline",  "行内双语", "每个文本框内原文下方追加译文行"),
             ]
         else:
             mode_options = [
-                ("paragraph", "段落对照模式（推荐）"),
-                ("bilingual", "行对照模式（原文+译文）"),
-                ("translation", "仅译文模式"),
+                ("paragraph",  "段落对照", "一段原文 + 一段译文交替排列（推荐）"),
+                ("bilingual",  "左右对照", "原文和译文分两列并排展示"),
+                ("translation", "纯译文", "仅输出翻译结果，不含原文"),
             ]
 
-        default_mode = mode_options[0][0]
-        for mode, label in mode_options:
-            rb = QRadioButton(label)
+        for mode, title, desc in mode_options:
+            opt_widget = QFrame()
+            opt_widget.setStyleSheet(f"""
+                QFrame {{
+                    background: {C.BG_PAGE}; border: 1px solid {C.BORDER_LIGHT};
+                    border-radius: 6px; padding: 8px 12px;
+                }}
+                QFrame:hover {{ border-color: {C.PRIMARY_HOVER}; background: {C.PRIMARY_LIGHT2}; }}
+            """)
+            opt_layout = QHBoxLayout(opt_widget)
+            opt_layout.setContentsMargins(10, 8, 10, 8)
+            opt_layout.setSpacing(10)
+
+            rb = QRadioButton()
             rb.setProperty("val", mode)
-            if mode == default_mode:
+            if mode == mode_options[0][0]:
                 rb.setChecked(True)
+            rb.setStyleSheet(f"""
+                QRadioButton::indicator {{ width: 14px; height: 14px; border: 2px solid {C.BORDER}; border-radius: 50%; background: {C.BG_CARD}; }}
+                QRadioButton::indicator:checked {{ border: 4px solid {C.PRIMARY}; }}
+            """)
             self.mode_group.addButton(rb)
-            mode_grid.addWidget(rb)
-        card_layout.addLayout(mode_grid)
+            opt_layout.addWidget(rb)
 
-        card_layout.addStretch()
+            text_col = QVBoxLayout()
+            text_col.setSpacing(2)
+            t_label = QLabel(title)
+            t_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
+            text_col.addWidget(t_label)
+            d_label = QLabel(desc)
+            d_label.setStyleSheet(f"font-size: 11px; color: {C.TEXT_THIRD}; background: transparent; border: none;")
+            d_label.setWordWrap(True)
+            text_col.addWidget(d_label)
+            opt_layout.addLayout(text_col, stretch=1)
 
+            mode_layout.addWidget(opt_widget)
+
+        main_layout.addWidget(mode_section)
+        main_layout.addSpacing(16)
+
+        # ── 按钮区 ──
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         btn_row.addStretch()
-        btn = QPushButton("确认导出")
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.clicked.connect(self.accept)
-        btn_row.addWidget(btn)
-        card_layout.addLayout(btn_row)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("cancelBtn")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setFixedHeight(36)
+        cancel_btn.setMinimumWidth(80)
+        cancel_btn.setStyleSheet(f"""
+            QPushButton#cancelBtn {{
+                background: {C.BG_PAGE}; color: {C.TEXT_SECONDARY};
+                border: 1px solid {C.BORDER}; border-radius: 6px;
+                padding: 0 20px; font-size: 13px; font-weight: 500;
+            }}
+            QPushButton#cancelBtn:hover {{ border-color: {C.TEXT_FOURTH}; color: {C.TEXT_PRIMARY}; }}
+        """)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("确认导出")
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setFixedHeight(36)
+        ok_btn.setMinimumWidth(100)
+        ok_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PRIMARY}; color: #FFFFFF;
+                border: none; border-radius: 6px;
+                padding: 0 24px; font-size: 13px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {C.PRIMARY_HOVER}; }}
+        """)
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        main_layout.addLayout(btn_row)
 
     def get_fmt(self):
         for b in self.fmt_group.buttons():
@@ -1595,6 +1672,7 @@ class MainWindow(QMainWindow):
         self.subtitle_obj = None
         self.subtitle_path = None
         self.subtitle_worker = None
+        self._cancelled = False
         self.apply_styles()
         self.setup_ui()
 
@@ -1641,6 +1719,24 @@ class MainWindow(QMainWindow):
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setStyleSheet(f"color: {C.TEXT_SECONDARY}; font-size: 12px; background: transparent; border: none; letter-spacing: 0.5px;")
         header_layout.addWidget(sub)
+
+        # 使用说明按钮（右上角）
+        header_top = QHBoxLayout()
+        header_top.addStretch()
+        help_btn = QPushButton("? 使用说明")
+        help_btn.setObjectName("textBtn")
+        help_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        help_btn.setFixedHeight(28)
+        help_btn.clicked.connect(self.show_help)
+        help_btn.setStyleSheet(f"""
+            QPushButton#textBtn {{
+                background: transparent; color: {C.PRIMARY}; border: 1px solid {C.PRIMARY};
+                border-radius: 14px; padding: 0 14px; font-size: 12px; font-weight: 500;
+            }}
+            QPushButton#textBtn:hover {{ background: {C.PRIMARY_LIGHT2}; }}
+        """)
+        header_top.addWidget(help_btn)
+        header_layout.addLayout(header_top)
 
         layout.addWidget(header)
 
@@ -1942,6 +2038,21 @@ class MainWindow(QMainWindow):
         self.translate_btn.setMinimumHeight(40)
         self.translate_btn.clicked.connect(self.do_translate)
 
+        self.cancel_btn = QPushButton("  取消翻译  ")
+        self.cancel_btn.setObjectName("dangerBtn")
+        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_btn.setMinimumHeight(36)
+        self.cancel_btn.setVisible(False)
+        self.cancel_btn.clicked.connect(self.do_cancel)
+        self.cancel_btn.setStyleSheet(f"""
+            QPushButton#dangerBtn {{
+                background: {C.DANGER}; color: #FFFFFF;
+                border: none; border-radius: {C.RADIUS_MD};
+                padding: 0 16px; font-size: 13px; font-weight: 500;
+            }}
+            QPushButton#dangerBtn:hover {{ background: #E5352D; }}
+        """)
+
         self.export_btn = QPushButton("  导出译文  ")
         self.export_btn.setObjectName("outlineBtn")
         self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1969,6 +2080,7 @@ class MainWindow(QMainWindow):
         self.glossary_btn.clicked.connect(self.open_glossary_manager)
 
         btn_row.addWidget(self.translate_btn, stretch=0)
+        btn_row.addWidget(self.cancel_btn)
         btn_row.addSpacing(12)
         btn_row.addWidget(self.export_btn)
         btn_row.addWidget(self.export_term_btn)
@@ -2133,7 +2245,10 @@ class MainWindow(QMainWindow):
             return
 
         self.last_source = source_text
+        self._cancelled = False
         self.translate_btn.setEnabled(False)
+        self.translate_btn.setVisible(False)
+        self.cancel_btn.setVisible(True)
         self.export_btn.setEnabled(False)
         self.export_term_btn.setEnabled(False)
         self.export_critique_btn.setEnabled(False)
@@ -2179,6 +2294,8 @@ class MainWindow(QMainWindow):
         self.progress_label.setText("翻译完成！")
         self.progress_bar.setValue(5)
         self.translate_btn.setEnabled(True)
+        self.translate_btn.setVisible(True)
+        self.cancel_btn.setVisible(False)
         self.export_btn.setEnabled(True)
         self.result_tabs.setCurrentIndex(2)
 
@@ -2186,6 +2303,127 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "错误", msg)
         self.progress_label.setText("")
         self.translate_btn.setEnabled(True)
+        self.translate_btn.setVisible(True)
+        self.cancel_btn.setVisible(False)
+
+    def do_cancel(self):
+        """取消正在进行的翻译"""
+        self._cancelled = True
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            self.worker.cancel()
+        if hasattr(self, 'subtitle_worker') and self.subtitle_worker and self.subtitle_worker.isRunning():
+            self.subtitle_worker.cancel()
+        self.progress_label.setText("正在取消...")
+        self.cancel_btn.setEnabled(False)
+
+    def show_help(self):
+        """显示使用说明弹窗"""
+        C = ArcoColors
+        dlg = QDialog(self)
+        dlg.setWindowTitle("使用说明")
+        dlg.setFixedSize(600, 560)
+        dlg.setStyleSheet(f"background-color: {C.BG_PAGE}; color: {C.TEXT_PRIMARY};")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        title = QLabel("使用说明")
+        title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 16, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+        layout.addWidget(title)
+
+        help_text = QTextEdit()
+        help_text.setReadOnly(True)
+        help_text.setStyleSheet(f"""
+            QTextEdit {{
+                background: {C.BG_CARD}; border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD}; padding: 16px;
+                font-size: 13px; line-height: 1.8; color: {C.TEXT_PRIMARY};
+            }}
+        """)
+        help_text.setHtml("""
+        <style>
+            h3 { color: #165DFF; margin: 12px 0 6px 0; font-size: 14px; }
+            p { margin: 4px 0; line-height: 1.7; }
+            ul { margin: 4px 0 8px 20px; }
+            li { margin: 2px 0; }
+            .tip { background: #F2F3F5; border-radius: 6px; padding: 10px 14px; margin: 8px 0; }
+        </style>
+
+        <h3>一、快速开始</h3>
+        <p>1. 在程序同目录下创建 <b>.env</b> 文件，填入 API 配置：</p>
+        <div class="tip">
+        OPENAI_API_KEY=sk-your-key<br>
+        OPENAI_BASE_URL=https://api.deepseek.com/v1<br>
+        OPENAI_MODEL=deepseek-chat
+        </div>
+        <p>2. 选择源语言和目标语言，输入或导入要翻译的内容</p>
+        <p>3. 点击「开始翻译」，等待五步翻译流程完成</p>
+        <p>4. 点击「导出译文」选择格式和模式保存</p>
+
+        <h3>二、支持的输入方式</h3>
+        <ul>
+            <li><b>文本输入</b>：直接粘贴文字到输入框</li>
+            <li><b>URL 抓取</b>：输入网页链接自动提取正文</li>
+            <li><b>文件导入</b>：支持 PDF / Word / Excel / PPT</li>
+            <li><b>字幕翻译</b>：支持 SRT / VTT / ASS 格式，保留时间轴</li>
+        </ul>
+
+        <h3>三、翻译流程（五步法）</h3>
+        <ul>
+            <li><b>第一步 深度分析</b>：AI 分析源文本术语、风格、难点</li>
+            <li><b>第二步 组装提示</b>：根据分析构建专业翻译提示词</li>
+            <li><b>第三步 初译</b>：AI 执行初步翻译</li>
+            <li><b>第四步 审校</b>：逐段检查准确性、翻译腔、表达</li>
+            <li><b>第五步 终稿润色</b>：依据审校报告修正，输出定稿</li>
+        </ul>
+
+        <h3>四、导出模式说明</h3>
+        <p><b>Word / PDF / Excel：</b></p>
+        <ul>
+            <li>段落对照：一段原文 + 一段译文交替排列（推荐）</li>
+            <li>左右对照：原文和译文分两列并排展示</li>
+            <li>纯译文：仅输出翻译结果</li>
+        </ul>
+        <p><b>PPT 专用：</b></p>
+        <ul>
+            <li>替换译文：保留原始格式，原文替换为译文</li>
+            <li>双语备注：正文保持原文，译文写入演讲者备注栏</li>
+            <li>行内双语：每个文本框内原文下方追加译文行</li>
+        </ul>
+
+        <h3>五、实用功能</h3>
+        <ul>
+            <li><b>取消翻译</b>：翻译过程中可随时点击红色「取消翻译」按钮</li>
+            <li><b>术语库</b>：自动从分析报告提取术语，支持手动管理</li>
+            <li><b>精简模式</b>：勾选后减少 API 调用量，节省成本</li>
+            <li><b>交换语言</b>：点击 ⇄ 按钮快速交换源/目标语言</li>
+        </ul>
+
+        <h3>六、支持的服务商</h3>
+        <div class="tip">
+        DeepSeek / OpenAI / 智谱AI / 任何兼容 OpenAI 接口的服务商<br>
+        只需修改 .env 中的 OPENAI_BASE_URL 即可切换
+        </div>
+        """)
+        layout.addWidget(help_text, stretch=1)
+
+        close_btn = QPushButton("知道了")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setFixedHeight(36)
+        close_btn.setMinimumWidth(100)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PRIMARY}; color: #FFFFFF; border: none;
+                border-radius: 6px; padding: 0 24px; font-size: 13px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {C.PRIMARY_HOVER}; }}
+        """)
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        dlg.exec()
 
     def _get_source_lang(self):
         return self.source_lang.currentText() if hasattr(self, 'source_lang') and self.source_lang else "English"
@@ -2606,10 +2844,14 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(step)
 
     def _on_subtitle_error(self, msg):
-        QMessageBox.critical(self, "字幕翻译错误", msg)
+        if not self._cancelled:
+            QMessageBox.critical(self, "字幕翻译错误", msg)
         self.progress_label.setText("")
         self.sub_translate_btn.setEnabled(True)
         self.sub_export_btn.setEnabled(True)
+        self.translate_btn.setEnabled(True)
+        self.translate_btn.setVisible(True)
+        self.cancel_btn.setVisible(False)
 
     def _on_subtitle_analysis_done(self, analysis):
         """第一步完成：实时显示 AI 分析报告到分析 tab"""
