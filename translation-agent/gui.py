@@ -1622,7 +1622,7 @@ class ExportDialog(QDialog):
                 border: 1px solid {C.BORDER}; border-radius: 6px;
                 padding: 0 20px; font-size: 13px; font-weight: 500;
             }}
-            QPushButton#cancelBtn:hover {{ border-color: {C.TEXT_FOURTH}; color: {C.TEXT_PRIMARY}; }}
+            QPushButton#cancelBtn:hover {{ border-color: {C.TEXT_DISABLED}; color: {C.TEXT_PRIMARY}; }}
         """)
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
