@@ -963,6 +963,124 @@ def _split_with_slide_awareness(text, max_len=80000):
     return chunks if chunks else [text]
 
 
+def _validate_slide_markers(translated_text, source_text=None):
+    """验证并修复译文中的幻灯片标记。
+
+    在五步翻译流程中，AI 可能在翻译/审校/终稿步骤中：
+    - 丢失部分 [幻灯片 N/M] 标记
+    - 修改标记格式（如加空格、改中英文标点）
+    - 跳过某些幻灯片
+
+    此函数在最终导出前做最后检查：
+    1. 如果有源文，从源文提取完整的幻灯片编号列表
+    2. 检查译文标记是否完整
+    3. 如果不完整，调用 file_handler._reconstruct_slide_markers 重建
+
+    Returns:
+        str: 修复后的译文
+    """
+    import re
+
+    if not _has_slide_markers(translated_text):
+        # 译文完全没有标记，需要从源文重建
+        if source_text and _has_slide_markers(source_text):
+            from file_handler import _reconstruct_slide_markers
+            # _reconstruct_slide_markers 需要原始文件路径，这里无法提供
+            # 改为从源文标记重建
+            return _rebuild_markers_from_source(translated_text, source_text)
+        return translated_text
+
+    # 检查标记是否连续、完整
+    trans_markers = re.findall(r'\[幻灯片\s+(\d+)/(\d+)\]', translated_text)
+    if not trans_markers:
+        return translated_text
+
+    # 获取总页数（取所有标记中最大的 M）
+    total_slides = max(int(m[1]) for m in trans_markers)
+    trans_slide_nums = set(int(m[0]) for m in trans_markers)
+    expected_nums = set(range(1, total_slides + 1))
+
+    if trans_slide_nums == expected_nums:
+        # 标记完整，无需修复
+        return translated_text
+
+    # 标记不完整，从源文重建
+    if source_text and _has_slide_markers(source_text):
+        return _rebuild_markers_from_source(translated_text, source_text)
+
+    return translated_text
+
+
+def _rebuild_markers_from_source(translated_text, source_text):
+    """当译文丢失标记时，根据源文的幻灯片结构为译文重建标记。
+
+    策略：
+    1. 从源文提取每页的内容行数
+    2. 从译文提取非标记行
+    3. 按源文各页的行数比例，将译文行分配到对应页
+    """
+    import re
+
+    # 从源文提取幻灯片结构
+    src_slides = {}  # {slide_num: line_count}
+    current_slide = None
+    for line in source_text.split("\n"):
+        m = re.match(r'^\s*\[幻灯片\s+(\d+)/(\d+)\]', line)
+        if m:
+            current_slide = int(m.group(1))
+            src_slides[current_slide] = 0
+        elif current_slide and line.strip() and not line.startswith("[翻译说明]"):
+            src_slides[current_slide] = src_slides.get(current_slide, 0) + 1
+
+    if not src_slides:
+        return translated_text
+
+    total_src_lines = sum(src_slides.values())
+    if total_src_lines == 0:
+        # 所有页面都只有标记没有内容，均匀分配
+        total_src_lines = len(src_slides)
+
+    # 提取译文非标记行
+    trans_lines = [
+        l.strip() for l in translated_text.split("\n")
+        if l.strip()
+        and not re.match(r'^\s*\[幻灯片', l)
+        and not l.startswith("[翻译说明]")
+    ]
+
+    if not trans_lines:
+        return translated_text
+
+    # 按比例分配
+    result_parts = []
+    trans_idx = 0
+    total_in_source = max(int(m.group(2)) for m in re.finditer(r'\[幻灯片\s+\d+/(\d+)\]', source_text))
+
+    for slide_num in sorted(src_slides.keys()):
+        src_count = src_slides[slide_num]
+        if src_count == 0:
+            expected = max(1, len(trans_lines) // len(src_slides))
+        else:
+            proportion = src_count / total_src_lines
+            expected = max(1, round(proportion * len(trans_lines)))
+
+        # 最后一页用完剩余
+        if slide_num == sorted(src_slides.keys())[-1]:
+            expected = len(trans_lines) - trans_idx
+
+        end_idx = min(trans_idx + expected, len(trans_lines))
+        slide_content = trans_lines[trans_idx:end_idx]
+
+        result_parts.append(f"[幻灯片 {slide_num}/{total_in_source}]")
+        if slide_content:
+            result_parts.extend(slide_content)
+        result_parts.append("")
+
+        trans_idx = end_idx
+
+    return "\n".join(result_parts)
+
+
 def step4_critique(source_text, draft, analysis, source_lang, target_lang,
                    compact_terms_hint=None):
     """审校译文 — 长文档分段审校，避免截断。PPT 感知分块。精简模式只传术语。"""
@@ -1754,12 +1872,16 @@ class _ExportWorker(QThread):
 
         original_path = self.file_path
         path = self.save_path
+
+        # 导出前验证并修复幻灯片标记
+        export_result = _validate_slide_markers(self.result, self.source)
+
         if self.mode == "bilingual_notes":
-            export_pptx_bilingual(original_path, self.result, path)
+            export_pptx_bilingual(original_path, export_result, path)
         elif self.mode == "bilingual_inline":
-            export_pptx_bilingual_inline(original_path, self.result, path)
+            export_pptx_bilingual_inline(original_path, export_result, path)
         else:
-            export_pptx_translation(original_path, self.result, path)
+            export_pptx_translation(original_path, export_result, path)
         self.success.emit(f"PPT 已保存到：\n{path}")
 
     def _export_pdf(self):

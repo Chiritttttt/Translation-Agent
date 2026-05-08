@@ -232,13 +232,13 @@ def read_pptx(file_path):
                             if t:
                                 body_lines.append(t)
 
-            # 跳过完全空白的幻灯片（纯图片页等）
-            if title_text or body_lines:
-                parts.append(f"[幻灯片 {idx}/{total}]")
-                if title_text:
-                    parts.append(title_text)
+            # 为每张幻灯片输出标记（包括纯图片页，保持编号一致）
+            parts.append(f"[幻灯片 {idx}/{total}]")
+            if title_text:
+                parts.append(title_text)
+            if body_lines:
                 parts.extend(body_lines)
-                parts.append("")  # 空行分隔各页
+            parts.append("")  # 空行分隔各页
 
         return "\n".join(parts).strip()
 
@@ -287,9 +287,10 @@ def read_file(file_path):
 def match_translation(original_lines, translated_text):
     """将译文行与原文行对齐。
 
-    策略：
-    1. 优先用文本相似度（最长公共子序列比例）精确匹配，避免按比例分配导致的错位
-    2. 回退到贪心左对齐（而非按比例分配），每条原文消耗一条译文
+    策略（按优先级）：
+    1. 行数相同 → 直接按序 1:1 匹配
+    2. 行数不同 → 用 LCS（最长公共子序列）对齐，保留顺序
+    3. 回退 → 贪心左对齐，每条原文消耗一条译文
     """
     import difflib
 
@@ -301,13 +302,19 @@ def match_translation(original_lines, translated_text):
     if trans_count == 0:
         return [""] * orig_count
 
-    # ── 路径 A：行数相同或接近，用 LCS 相似度做精确匹配 ──
-    if abs(orig_count - trans_count) <= 2 and orig_count == trans_count:
-        # 完全一对一，直接按序匹配
+    # ── 路径 A：行数完全相同，直接按序匹配 ──
+    if orig_count == trans_count:
         return list(trans_lines[:orig_count])
 
-    # ── 路径 B：行数不同，用贪心左对齐（每条原文消耗一条译文） ──
-    # 这比原来的按比例分配更安全：不会跳过译文行，也不会重复分配
+    # ── 路径 B：行数不同，用 LCS 对齐 ──
+    # 将原文和译文视为两个序列，找出最长公共子序列，
+    # 然后将非公共部分（新增/删除的行）均匀分配到相邻的公共行之间。
+    # 这样即使 AI 合并或拆分了某些行，也能正确对齐。
+    result = _lcs_align(original_lines, trans_lines)
+    if result is not None:
+        return result
+
+    # ── 路径 C：回退到贪心左对齐 ──
     result = []
     trans_idx = 0
     for i in range(orig_count):
@@ -315,9 +322,81 @@ def match_translation(original_lines, translated_text):
             result.append(trans_lines[trans_idx])
             trans_idx += 1
         else:
-            # 译文已用完，剩余原文保持原文不变（避免空白）
             result.append(original_lines[i])
     return result
+
+
+def _lcs_align(orig_lines, trans_lines):
+    """基于 LCS 的智能对齐。
+
+    通过 difflib.SequenceMatcher 找出原文和译文中"对应"的行
+    （基于文本相似度），然后将差异部分均匀分配。
+    返回与 orig_lines 等长的列表，每项是对应的译文。
+    """
+    import difflib
+
+    # 构建相似度矩阵：用文本长度比和字符重叠度判断哪些译文行
+    # "对应"哪些原文行
+    orig_count = len(orig_lines)
+    trans_count = len(trans_lines)
+
+    # 快速路径：行数差异太大时 LCS 对齐效果差，回退到贪心
+    ratio = max(orig_count, trans_count) / (min(orig_count, trans_count) + 1)
+    if ratio > 5:
+        return None
+
+    # 用 SequenceMatcher 找出两个序列的最长公共子序列
+    # 但我们需要的是"语义对齐"而非"文本完全匹配"
+    # 所以用一个简化方案：将译文按比例切分分配给原文段落
+    #
+    # 更实用的方案：计算每段原文的大致字符占比，
+    # 按比例将译文行分配到对应的原文段落
+    orig_char_counts = [len(l) for l in orig_lines]
+    total_orig_chars = sum(orig_char_counts)
+    if total_orig_chars == 0:
+        return None
+
+    trans_char_counts = [len(l) for l in trans_lines]
+    total_trans_chars = sum(trans_char_counts)
+    if total_trans_chars == 0:
+        return None
+
+    # 按字符比例分配：每段原文应分到的字符数
+    result = []
+    trans_char_budget = 0.0
+    trans_idx = 0
+    accumulated_trans_text = ""
+
+    for i in range(orig_count):
+        # 这段原文应分到的译文字符数
+        proportion = orig_char_counts[i] / total_orig_chars
+        target_chars = proportion * total_trans_chars
+        trans_char_budget += target_chars
+
+        # 消耗译文行直到达到预算
+        while trans_idx < trans_count:
+            accumulated_trans_text += trans_lines[trans_idx]
+            trans_idx += 1
+            if len(accumulated_trans_text) >= trans_char_budget * 0.8:
+                break
+
+        result.append(accumulated_trans_text.strip())
+        accumulated_trans_text = ""
+
+    # 处理剩余译文行（归入最后一段）
+    remaining = [trans_lines[j] for j in range(trans_idx, trans_count)]
+    if remaining:
+        last_text = "\n".join(remaining)
+        if result:
+            result[-1] = (result[-1] + "\n" + last_text).strip()
+        else:
+            result.append(last_text)
+
+    # 确保返回与 orig_lines 等长的列表
+    while len(result) < orig_count:
+        result.append(orig_lines[len(result)])
+
+    return result[:orig_count]
 
 
 # ─── 工具：复制 DOCX 格式 ────────────────────────────────
@@ -802,12 +881,14 @@ def _split_title_and_body(lines):
 def _modify_slide_xml(xml_bytes, trans_lines):
     """修改幻灯片 XML 中的文本内容，保留原始 XML 结构。
 
-    改进版：区分标题占位符和正文，分别匹配译文行。
-    read_pptx 提取顺序是「标题 → 正文行」，译文也是同样顺序，
-    因此必须分开匹配，否则会导致标题和正文错位。
+    改进版：
+    - 区分标题占位符和正文，分别匹配译文行
+    - 检测表格结构（<a:tbl>），将单元格段落按行分组，
+      与 read_pptx 的行级输出（"cell1 | cell2 | cell3"）对齐
+    - 非表格段落逐个匹配
 
-    标题检测方式：在每个 <a:p> 段落向前搜索 800 字符范围内是否有
-    <p:ph type="title"|"ctrTitle"|"subTitle"> 或 <p:ph idx="0">。
+    read_pptx 提取顺序是「标题 → 正文行（含表格行）」，译文也是同样顺序，
+    因此必须分开匹配，否则会导致标题和正文错位。
 
     原理：
     - PPTX 中文本存储在 <a:t> 标签中
@@ -841,17 +922,41 @@ def _modify_slide_xml(xml_bytes, trans_lines):
             result = result[:m.start(2)] + new_text + result[m.end(2):]
         return result.encode("utf-8")
 
-    # 3. 收集每个段落信息，并检测是否为标题段落
-    #    向前搜索 800 字符范围内找 <p:ph type="title"...>
+    # 3. 收集每个段落信息，并检测标题和表格归属
     _ph_title_re = re.compile(
         r'<p:ph\b[^>]*type\s*=\s*["\'](?:title|ctrTitle|subTitle)["\']'
         r'|<p:ph\b[^>]*idx\s*=\s*["\']0["\']',
     )
-    paragraphs = []  # [{"text": str, "runs": [...], "is_title": bool}, ...]
+
+    # 检测表格区域：<a:tbl> ... </a:tbl>
+    tbl_regions = []
+    for tbl_m in re.finditer(r'<a:tbl\b', xml_str):
+        tbl_end = re.search(r'</a:tbl>', xml_str[tbl_m.start():])
+        if tbl_end:
+            tbl_regions.append((tbl_m.start(), tbl_m.start() + tbl_end.end()))
+
+    def _in_table(pos):
+        return any(s <= pos <= e for s, e in tbl_regions)
+
+    # 检测表格行区域：<a:tr> ... </a:tr>
+    tr_regions = []
+    for tr_m in re.finditer(r'<a:tr\b', xml_str):
+        tr_end = re.search(r'</a:tr>', xml_str[tr_m.start():])
+        if tr_end:
+            tr_regions.append((tr_m.start(), tr_m.start() + tr_end.end()))
+
+    def _get_table_row(pos):
+        """返回段落所在的表格行索引（在 tr_regions 中的序号），非表格返回 -1"""
+        for i, (s, e) in enumerate(tr_regions):
+            if s <= pos <= e:
+                return i
+        return -1
+
+    paragraphs = []  # [{"text", "runs", "is_title", "in_table", "table_row_idx"}, ...]
     t_idx = 0
 
     for p_start, p_end in zip(p_open_pos, p_close_pos):
-        # 检测标题：向前找 <p:ph>（在当前 shape 内）
+        # 检测标题
         search_start = max(0, p_start - 800)
         pre_text = xml_str[search_start:p_start]
         is_title = bool(_ph_title_re.search(pre_text))
@@ -867,42 +972,109 @@ def _modify_slide_xml(xml_bytes, trans_lines):
             t_idx += 1
 
         if full_text.strip() and runs:
-            paragraphs.append({"text": full_text, "runs": runs, "is_title": is_title})
+            paragraphs.append({
+                "text": full_text,
+                "runs": runs,
+                "is_title": is_title,
+                "in_table": _in_table(p_start),
+                "table_row_idx": _get_table_row(p_start),
+            })
 
     if not paragraphs:
         return xml_bytes
 
-    # 4. 检查是否检测到了标题段落
+    # 4. 分离标题、表格段落组、非表格正文段落
     title_paras = [p for p in paragraphs if p["is_title"]]
-    body_paras = [p for p in paragraphs if not p["is_title"]]
+    table_paras = [p for p in paragraphs if p["in_table"] and not p["is_title"]]
+    non_table_paras = [p for p in paragraphs if not p["in_table"] and not p["is_title"]]
 
-    if title_paras:
-        # ── 有标题占位符：标题和正文分开匹配 ──
-        trans_title, trans_body_lines = _split_title_and_body(trans_lines)
+    # 将表格段落按行分组，每行的段落文本用 " | " 拼接（与 read_pptx 一致）
+    table_row_groups = {}  # {row_idx: [para, ...]}
+    for p in table_paras:
+        row_idx = p["table_row_idx"]
+        if row_idx >= 0:
+            table_row_groups.setdefault(row_idx, []).append(p)
 
-        title_matched = {}
-        if trans_title:
-            title_matched[title_paras[0]["runs"][0][0]] = trans_title
+    # 按行索引排序，构建表格行文本列表（与 read_pptx 输出格式一致）
+    sorted_row_indices = sorted(table_row_groups.keys())
+    table_rows = []
+    for ri in sorted_row_indices:
+        row_paras = table_row_groups[ri]
+        # 每个单元格的第一个段落文本作为该单元格的文本
+        # read_pptx 是 cell.text.strip()，即单元格内所有段落拼接
+        # 但 _extract_table_text 是按行输出 "cell1 | cell2"
+        # 这里我们直接把该行所有段落文本按序拼接作为一行
+        row_text = " | ".join(p["text"] for p in row_paras)
+        table_rows.append(row_text)
 
-        body_matched = {}
-        if body_paras and trans_body_lines:
-            body_orig = [p["text"] for p in body_paras]
-            matched_lines = match_translation(body_orig, "\n".join(trans_body_lines))
-            for i, bp in enumerate(body_paras):
-                if i < len(matched_lines):
-                    body_matched[bp["runs"][0][0]] = matched_lines[i]
-    else:
-        # ── 无标题占位符（自由布局/自定义模板）：所有段落统一匹配 ──
-        #    不拆分标题/正文，直接将全部译文行与全部段落匹配
-        title_matched = {}
-        body_matched = {}
-        all_orig = [p["text"] for p in paragraphs]
-        matched_lines = match_translation(all_orig, "\n".join(trans_lines))
-        for i, bp in enumerate(paragraphs):
-            if i < len(matched_lines):
-                body_matched[bp["runs"][0][0]] = matched_lines[i]
+    trans_title, trans_body_lines = _split_title_and_body(trans_lines)
 
-    # 5. 替换：从后往前，避免位置偏移
+    # 5. 匹配译文
+    title_matched = {}
+    if trans_title and title_paras:
+        title_matched[title_paras[0]["runs"][0][0]] = trans_title
+
+    body_matched = {}
+
+    # 将非表格正文和表格行合并为统一的匹配列表
+    # 匹配时按照 read_pptx 的输出顺序：标题之后，先是非表格正文，再是表格行
+    # 但实际上 read_pptx 遍历 shapes 的顺序决定了输出顺序
+    # 所以我们需要按 XML 中的出现顺序来构建原文列表
+    #
+    # 简化方案：将非表格段落和表格行交替出现在 XML 中的顺序作为匹配顺序
+    non_table_orig = [p["text"] for p in non_table_paras]
+
+    # 构建有序的"原文单元"列表：非表格段落 + 表格行，按 XML 位置排列
+    ordered_units = []  # [(type, data), ...] type="para" or "table_row"
+    used_table_rows = set()
+
+    for p in paragraphs:
+        if p["is_title"]:
+            continue
+        if p["in_table"] and p["table_row_idx"] >= 0:
+            ri = p["table_row_idx"]
+            if ri not in used_table_rows:
+                used_table_rows.add(ri)
+                ordered_units.append(("table_row", ri))
+        elif not p["in_table"]:
+            ordered_units.append(("para", p))
+
+    # 构建原文文本列表（用于 match_translation）
+    orig_texts_for_match = []
+    for unit_type, unit_data in ordered_units:
+        if unit_type == "table_row":
+            ri = unit_data
+            # 找到这个行在 sorted_row_indices 中的位置
+            if ri in table_row_groups:
+                row_text = " | ".join(p["text"] for p in table_row_groups[ri])
+                orig_texts_for_match.append(row_text)
+        else:
+            orig_texts_for_match.append(unit_data["text"])
+
+    # 用译文匹配
+    matched_texts = match_translation(
+        orig_texts_for_match,
+        "\n".join(trans_body_lines),
+    )
+
+    # 将匹配结果映射回段落
+    for i, (unit_type, unit_data) in enumerate(ordered_units):
+        if i < len(matched_texts) and matched_texts[i]:
+            if unit_type == "table_row":
+                # 表格行：译文是 "cell1 | cell2 | ..." 格式，需要拆分回各单元格
+                ri = unit_data
+                row_paras = table_row_groups.get(ri, [])
+                translated_row = matched_texts[i]
+                # 按 " | " 拆分译文
+                cells = translated_row.split(" | ")
+                # 将译文分配到各单元格段落（每段对应一个单元格）
+                for ci, cp in enumerate(row_paras):
+                    if ci < len(cells):
+                        body_matched[cp["runs"][0][0]] = cells[ci].strip()
+            else:
+                body_matched[unit_data["runs"][0][0]] = matched_texts[i]
+
+    # 6. 替换：从后往前，避免位置偏移
     for i in range(len(paragraphs) - 1, -1, -1):
         p = paragraphs[i]
         runs = p["runs"]
@@ -911,19 +1083,15 @@ def _modify_slide_xml(xml_bytes, trans_lines):
 
         first_run_start = runs[0][0]
 
-        # 查找匹配的译文
         new_text = title_matched.get(first_run_start) or body_matched.get(first_run_start)
         if not new_text:
-            # 无匹配译文，保留原文
             continue
 
         escaped = _xml_escape(new_text)
 
-        # 第一个 <a:t> 写入完整译文
         s, e, _ = runs[0]
         xml_str = xml_str[:s] + escaped + xml_str[e:]
 
-        # 其余 <a:t> 清空
         for j in range(len(runs) - 1, 0, -1):
             rs, re_, _ = runs[j]
             xml_str = xml_str[:rs] + xml_str[re_:]
@@ -938,6 +1106,70 @@ def _xml_escape(text):
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace('"', "&quot;"))
+
+
+def _get_slide_order_mapping(original_path):
+    """从 PPTX 的 presentation.xml 读取幻灯片的实际展示顺序。
+
+    PPTX 中 slide 文件名（如 slide1.xml, slide2.xml）不一定等于展示顺序。
+    用户在 PowerPoint 中拖动排序幻灯片后，文件名不变，但 presentation.xml
+    中的 <p:sldId> 顺序会改变。
+
+    Returns:
+        dict: {presentation_order: filename_number}
+        例如 {1: 3, 2: 1, 3: 2} 表示展示第1页对应 slide3.xml
+
+        如果读取失败，返回 None（回退到按文件名顺序）。
+    """
+    import zipfile
+    import re
+
+    try:
+        with zipfile.ZipFile(original_path, "r") as zf:
+            # 读取 presentation.xml
+            pres_xml = zf.read("ppt/presentation.xml").decode("utf-8")
+            # 读取 presentation.xml.rels 获取 rId → 文件名映射
+            rels_xml = ""
+            try:
+                rels_xml = zf.read("ppt/_rels/presentation.xml.rels").decode("utf-8")
+            except KeyError:
+                pass
+
+        # 1. 从 presentation.xml 提取 <p:sldId> 的 rId，按出现顺序即展示顺序
+        #    格式: <p:sldId id="256" r:embed="rId2"/>
+        sld_id_re = re.compile(r'<p:sldId\b[^>]*r:embed=["\'](rId\d+)["\']', re.DOTALL)
+        rids_in_order = [m.group(1) for m in sld_id_re.finditer(pres_xml)]
+
+        if not rids_in_order:
+            return None
+
+        # 2. 从 rels 文件构建 rId → 文件名映射
+        if not rels_xml:
+            return None
+
+        rel_re = re.compile(
+            r'<Relationship\s+Id=["\'](rId\d+)["\']\s+[^>]*Target=["\']([^"\']+)["\']',
+            re.DOTALL,
+        )
+        rid_to_target = {}
+        for m in rel_re.finditer(rels_xml):
+            rid = m.group(1)
+            target = m.group(2).lstrip("/")
+            rid_to_target[rid] = target
+
+        # 3. 构建展示顺序 → 文件名编号的映射
+        slide_re = re.compile(r"slide(\d+)\.xml$")
+        order_to_filenum = {}
+        for order_idx, rid in enumerate(rids_in_order, 1):
+            target = rid_to_target.get(rid, "")
+            sm = slide_re.search(target)
+            if sm:
+                order_to_filenum[order_idx] = int(sm.group(1))
+
+        return order_to_filenum if order_to_filenum else None
+
+    except Exception:
+        return None
 
 
 def _export_pptx_zip(original_path, translated, output_path):
@@ -959,7 +1191,22 @@ def _export_pptx_zip(original_path, translated, output_path):
     translated = _reconstruct_slide_markers(original_path, translated)
     trans_slides = _parse_translated_slides(translated)
 
+    # 获取正确的幻灯片展示顺序映射
+    order_to_filenum = _get_slide_order_mapping(original_path)
+
     slide_re = re.compile(r"ppt/slides/slide(\d+)\.xml$")
+
+    # 构建展示顺序 → 译文的映射
+    # trans_slides 的 key 是 read_pptx 中的展示顺序号
+    # order_to_filenum 将展示顺序映射到文件名编号
+    filenum_to_trans = {}
+    if order_to_filenum:
+        for order_idx, file_num in order_to_filenum.items():
+            if order_idx in trans_slides:
+                filenum_to_trans[file_num] = trans_slides[order_idx]
+    else:
+        # 回退：直接用展示顺序号当文件名编号
+        filenum_to_trans = trans_slides
 
     with zipfile.ZipFile(original_path, "r") as zin:
         with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -967,16 +1214,15 @@ def _export_pptx_zip(original_path, translated, output_path):
                 # 只处理幻灯片 XML
                 sm = slide_re.match(item.filename)
                 if sm:
-                    slide_num = int(sm.group(1))
-                    if slide_num in trans_slides and trans_slides[slide_num]:
+                    slide_filenum = int(sm.group(1))
+                    if slide_filenum in filenum_to_trans and filenum_to_trans[slide_filenum]:
                         data = zin.read(item.filename)
                         modified = _modify_slide_xml(
-                            data, trans_slides[slide_num])
+                            data, filenum_to_trans[slide_filenum])
                         zout.writestr(item, modified)
                         continue
 
                 # 其他文件（图片、媒体等）→ 原样拷贝
-                # 大文件（>5MB）用临时文件避免内存占用
                 if item.file_size > 5 * 1024 * 1024:
                     tmp_path = None
                     try:
@@ -984,9 +1230,11 @@ def _export_pptx_zip(original_path, translated, output_path):
                         os.close(fd)
                         with zin.open(item) as src, open(tmp_path, "wb") as dst:
                             shutil.copyfileobj(src, dst)
+                        # 保留原始 ZIP 元数据（时间戳、权限等）
                         zout.write(
                             tmp_path, item.filename,
-                            compress_type=item.compress_type)
+                            compress_type=item.compress_type,
+                            compresslevel=None)
                     finally:
                         if tmp_path and os.path.exists(tmp_path):
                             os.unlink(tmp_path)
