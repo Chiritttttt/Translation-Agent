@@ -137,7 +137,7 @@ def _ocr_with_vision(file_path, page_count):
                         },
                     ],
                     temperature=0.1,
-                    max_tokens=4096,
+                    max_tokens=16384,
                 )
 
                 page_text = response.choices[0].message.content or ""

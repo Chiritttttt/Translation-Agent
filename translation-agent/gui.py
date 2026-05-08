@@ -677,7 +677,8 @@ def chat(system, user, temperature=0.3):
     resp = client.chat.completions.create(
         model=model, temperature=temperature,
         messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}]
+                  {"role": "user", "content": user}],
+        max_tokens=131072,
     )
     return resp.choices[0].message.content
 
@@ -702,7 +703,7 @@ def fetch_url(url):
     raise RuntimeError("无法抓取URL，请手动复制正文。")
 
 
-def split_chunks(text, max_chars=8000):
+def split_chunks(text, max_chars=80000):
     """智能分块，兼容中文（按字符数）和英文（按空格分词）。
 
     PPT 感知：如果文本包含 [幻灯片 N/M] 标记，优先在幻灯片边界断开，
@@ -785,12 +786,12 @@ def split_chunks(text, max_chars=8000):
     else:
         # 英文/西文：按空格分词
         words = text.split()
-        if len(words) <= 3000:
+        if len(words) <= 30000:
             return [text]
         chunks, current = [], []
         for word in words:
             current.append(word)
-            if len(current) >= 3000:
+            if len(current) >= 30000:
                 chunks.append(" ".join(current))
                 current = []
         if current:
@@ -803,7 +804,7 @@ def split_chunks(text, max_chars=8000):
 # ═══════════════════════════════════════════════════════════
 def step1_analyze(text, source_lang, target_lang, audience, style):
     """深度分析源文本，长文档分段分析后合并术语，确保覆盖完整文档。"""
-    ANALYSIS_CHUNK = 6000
+    ANALYSIS_CHUNK = 80000
 
     sys_prompt = """你是专业翻译前置分析师。
 输出严格按照以下固定Markdown结构：
@@ -986,7 +987,7 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
     if compact_terms_hint:
         reference_block = f"术语参考：\n{compact_terms_hint}"
     else:
-        reference_block = f"分析要点：\n{analysis[:2000]}"
+        reference_block = f"分析要点：\n{analysis[:8000]}"
 
     is_ppt = _has_slide_markers(draft)
     critiques = []
@@ -1087,7 +1088,7 @@ class SubtitleWorker(QThread):
     # ── 第一步：AI 分析字幕内容 ──
     def _step_analyze(self, source_text):
         """分段分析字幕内容，长字幕确保覆盖完整。"""
-        ANALYSIS_CHUNK = 8000
+        ANALYSIS_CHUNK = 80000
 
         sys_prompt = """你是专业翻译前置分析师，当前任务是对字幕文本进行分析。
 字幕文本每行是一条字幕，格式如 [001] Hello world。
@@ -1231,7 +1232,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
 
     # ── 第四步：审校 ──
     def _step_critique(self, source_text, draft_text, analysis, terms_hint=None):
-        max_len = 6000
+        max_len = 80000
         src_chunks = [source_text[i:i+max_len] for i in range(0, len(source_text), max_len)]
         draft_chunks = [draft_text[i:i+max_len] for i in range(0, len(draft_text), max_len)]
         pairs = []
@@ -1247,7 +1248,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
         if self.compact and terms_hint:
             reference_block = f"术语参考：\n{terms_hint}"
         else:
-            reference_block = f"分析要点：\n{analysis[:2000]}"
+            reference_block = f"分析要点：\n{analysis[:8000]}"
 
         critiques = []
         for idx, (src_part, draft_part) in enumerate(pairs):
@@ -1272,7 +1273,7 @@ Keep the [NNN] prefix in your response. Only output translated lines, nothing el
 
     # ── 第五步：终稿润色 ──
     def _step_final(self, draft_text, critique):
-        max_len = 6000
+        max_len = 80000
         draft_chunks = [draft_text[i:i+max_len] for i in range(0, len(draft_text), max_len)]
 
         if len(draft_chunks) <= 1:
