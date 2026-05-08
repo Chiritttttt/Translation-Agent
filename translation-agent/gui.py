@@ -1675,6 +1675,8 @@ class _ExportWorker(QThread):
 
     def run(self):
         try:
+            import gc
+            gc.collect()  # 导出前清理内存
             if not self.save_path:
                 return  # 用户取消了保存对话框
             if self.fmt in ("docx", "doc"):
@@ -1687,6 +1689,7 @@ class _ExportWorker(QThread):
                 self._export_pdf()
             else:
                 self._export_txt()
+            gc.collect()  # 导出后清理内存
         except Exception as e:
             self.error.emit(f"导出失败：{str(e)}")
 
@@ -1734,6 +1737,15 @@ class _ExportWorker(QThread):
                 "当前可导出为 Word / Excel / TXT 格式。"
             )
             return
+
+        # 双语备注/行内双语需要 python-pptx 加载完整文件
+        if self.mode in ("bilingual_notes", "bilingual_inline"):
+            file_size_mb = os.path.getsize(self.file_path) / (1024 * 1024)
+            if file_size_mb > 200:
+                import gc
+                gc.collect()
+                logger.warning(f"PPT {file_size_mb:.0f}MB 使用双语模式导出，可能需要较多内存")
+
         original_path = self.file_path
         path = self.save_path
         if self.mode == "bilingual_notes":
@@ -1835,6 +1847,22 @@ class MainWindow(QMainWindow):
         # 使用说明按钮（右上角）
         header_top = QHBoxLayout()
         header_top.addStretch()
+
+        # 翻译历史按钮
+        history_btn = QPushButton("翻译历史")
+        history_btn.setObjectName("historyBtn")
+        history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        history_btn.setFixedHeight(28)
+        history_btn.clicked.connect(self.open_history)
+        history_btn.setStyleSheet(f"""
+            QPushButton#historyBtn {{
+                background: transparent; color: {C.PRIMARY}; border: 1px solid {C.PRIMARY};
+                border-radius: 14px; padding: 0 14px; font-size: 12px; font-weight: 500;
+            }}
+            QPushButton#historyBtn:hover {{ background: {C.PRIMARY_LIGHT2}; }}
+        """)
+        header_top.addWidget(history_btn)
+
         help_btn = QPushButton("? 使用说明")
         help_btn.setObjectName("textBtn")
         help_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2416,6 +2444,8 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setVisible(False)
         self.export_btn.setEnabled(True)
         self.result_tabs.setCurrentIndex(2)
+        # 自动保存翻译记录到本地数据库
+        self._save_translation_record('document')
 
     def on_error(self, msg):
         QMessageBox.critical(self, "错误", msg)
@@ -2443,6 +2473,445 @@ class MainWindow(QMainWindow):
             self.subtitle_worker.cancel()
         self.progress_label.setText("已取消翻译")
         self._reset_to_idle()
+
+    # ═══════════════════════════════════════════════════════════
+    # 翻译历史持久化
+    # ═══════════════════════════════════════════════════════════
+    def _save_translation_record(self, record_type):
+        """翻译完成后自动保存记录到本地数据库（后台线程，不阻塞UI）。"""
+        try:
+            import history_db
+            src_lang = self._get_source_lang()
+            tgt_lang = self._get_target_lang()
+            file_name = ''
+            if self.file_path:
+                file_name = os.path.basename(self.file_path)
+            title = history_db.auto_title(
+                self.last_source, file_name, src_lang, tgt_lang)
+
+            history_db.save_record(
+                title=title,
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+                source_text=self.last_source,
+                result_text=self.last_result,
+                analysis=self.last_analysis,
+                critique=self.last_critique,
+                style=self.style_input.text() if hasattr(self, 'style_input') else '',
+                audience=self.audience_input.text() if hasattr(self, 'audience_input') else '',
+                file_name=file_name,
+                file_type=self.file_type or '',
+                file_path=self.file_path or '',
+                record_type=record_type,
+            )
+            logger.info(f"翻译记录已自动保存: {title}")
+        except Exception as e:
+            logger.error(f"保存翻译记录失败: {e}")
+
+    def _save_subtitle_record(self, subtitle_obj):
+        """字幕翻译完成后自动保存。"""
+        try:
+            import history_db
+            from subtitle_handler import subtitle_to_text
+            src_lang = self._get_source_lang()
+            tgt_lang = self._get_target_lang()
+            file_name = os.path.basename(self.subtitle_path) if self.subtitle_path else ''
+            source_text = subtitle_to_text(subtitle_obj, include_index=True, include_time=False)
+            result_lines = [e.translated for e in subtitle_obj.entries if e.translated]
+            result_text = '\n'.join(result_lines)
+            title = history_db.auto_title(source_text, file_name, src_lang, tgt_lang)
+
+            # 序列化字幕数据
+            subtitle_data = []
+            for e in subtitle_obj.entries:
+                subtitle_data.append({
+                    'index': e.index,
+                    'start_time': e.start_time,
+                    'end_time': e.end_time,
+                    'text': e.text,
+                    'translated': e.translated,
+                })
+
+            history_db.save_record(
+                title=title,
+                source_lang=src_lang,
+                target_lang=tgt_lang,
+                source_text=source_text,
+                result_text=result_text,
+                analysis=self.last_analysis,
+                critique=self.last_critique,
+                style=self.style_input.text() if hasattr(self, 'style_input') else '',
+                audience=self.audience_input.text() if hasattr(self, 'audience_input') else '',
+                file_name=file_name,
+                file_type='subtitle',
+                file_path=self.subtitle_path or '',
+                record_type='subtitle',
+                subtitle_data=subtitle_data,
+            )
+            logger.info(f"字幕翻译记录已自动保存: {title}")
+        except Exception as e:
+            logger.error(f"保存字幕翻译记录失败: {e}")
+
+    # ═══════════════════════════════════════════════════════════
+    # 翻译历史对话框
+    # ═══════════════════════════════════════════════════════════
+    def open_history(self):
+        """打开翻译历史记录窗口，支持浏览、恢复、删除。"""
+        import history_db
+
+        C = ArcoColors
+        dlg = QDialog(self)
+        dlg.setWindowTitle("翻译历史")
+        dlg.setMinimumSize(900, 620)
+        dlg.resize(960, 660)
+        dlg.setStyleSheet(f"""
+            QDialog {{
+                background-color: {C.BG_PAGE}; color: {C.TEXT_PRIMARY};
+            }}
+            QLabel {{
+                color: {C.TEXT_PRIMARY}; background: transparent;
+            }}
+            QPushButton {{
+                color: {C.TEXT_PRIMARY}; background: {C.BG_CARD};
+                border: 1px solid {C.BORDER}; border-radius: 6px;
+                padding: 6px 16px; font-size: 13px;
+            }}
+            QPushButton:hover {{
+                border-color: {C.PRIMARY}; color: {C.PRIMARY};
+                background: {C.PRIMARY_LIGHT};
+            }}
+            QPushButton:disabled {{
+                color: {C.TEXT_DISABLED}; border-color: {C.BORDER_LIGHT}; background: {C.FILL1};
+            }}
+            QLineEdit {{
+                color: {C.TEXT_PRIMARY}; background: {C.BG_CARD};
+                border: 1px solid {C.BORDER}; border-radius: {C.RADIUS_SM};
+                padding: 0 8px; font-size: 13px;
+            }}
+            QLineEdit:focus {{ border-color: {C.PRIMARY}; }}
+            QTableWidget {{
+                background-color: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT}; border-radius: {C.RADIUS_MD};
+                gridline-color: {C.BORDER_LIGHT}; font-size: 13px;
+                selection-background-color: {C.PRIMARY_LIGHT};
+                selection-color: {C.PRIMARY}; alternate-background-color: {C.FILL1};
+            }}
+            QTableWidget::item {{
+                padding: 8px 10px; border-bottom: 1px solid {C.BORDER_LIGHT};
+            }}
+            QTableWidget::item:hover {{ background-color: {C.PRIMARY_LIGHT2}; }}
+            QHeaderView::section {{
+                background-color: {C.FILL2}; color: {C.TEXT_REGULAR};
+                border: none; border-bottom: 2px solid {C.BORDER};
+                border-right: 1px solid {C.BORDER_LIGHT};
+                padding: 8px 6px; font-size: 13px; font-weight: 600;
+            }}
+        """)
+
+        main_layout = QVBoxLayout(dlg)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # ── 标题行 ──
+        title_row = QHBoxLayout()
+        title = QLabel("翻译历史")
+        title.setFont(QFont(C.FONT_FAMILY.split(",")[0].strip().strip("'"), 16, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.TEXT_PRIMARY}; border: none; background: transparent;")
+        title_row.addWidget(title)
+        title_row.addStretch()
+
+        # 统计信息
+        db_size = history_db.get_db_size_mb()
+        count = history_db.get_record_count()
+        info_lbl = QLabel(f"{count} 条记录  |  数据库 {db_size:.1f} MB")
+        info_lbl.setStyleSheet(f"color: {C.TEXT_SECONDARY}; background: transparent; font-size: 12px;")
+        title_row.addWidget(info_lbl)
+        main_layout.addLayout(title_row)
+
+        # ── 搜索栏 ──
+        search_frame = QFrame()
+        search_frame.setStyleSheet(f"""
+            QFrame {{
+                background: {C.BG_CARD}; border: 1px solid {C.BORDER_LIGHT};
+                border-radius: {C.RADIUS_MD};
+            }}
+        """)
+        search_layout = QHBoxLayout(search_frame)
+        search_layout.setContentsMargins(10, 6, 10, 6)
+        search_layout.setSpacing(8)
+        search_icon = QLabel("🔍")
+        search_icon.setStyleSheet("background: transparent; font-size: 14px;")
+        search_layout.addWidget(search_icon)
+        search_le = QLineEdit()
+        search_le.setPlaceholderText("搜索翻译记录（标题、原文、译文）...")
+        search_le.setFrame(False)
+        search_le.setFixedHeight(30)
+        search_layout.addWidget(search_le)
+        main_layout.addWidget(search_frame)
+
+        # ── 表格 ──
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels(["标题", "语言对", "类型", "文件", "字数", "时间"])
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(False)
+        # 列宽
+        header_view = table.horizontalHeader()
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header_view.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(0, 320)
+        table.setColumnWidth(1, 120)
+        table.setColumnWidth(2, 60)
+        table.setColumnWidth(3, 140)
+        table.setColumnWidth(4, 80)
+        table.setColumnWidth(5, 130)
+        main_layout.addWidget(table, stretch=1)
+
+        # ── 按钮行 ──
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        btn_row.addStretch()
+
+        # 删除选中按钮
+        del_btn = QPushButton("删除选中")
+        del_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.DANGER}; background: {C.BG_CARD};
+                border: 1px solid {C.DANGER_LIGHT}; border-radius: 6px;
+                padding: 6px 16px; font-size: 13px;
+            }}
+            QPushButton:hover {{
+                background: {C.DANGER_LIGHT}; border-color: {C.DANGER};
+            }}
+            QPushButton:disabled {{
+                color: {C.TEXT_DISABLED}; border-color: {C.BORDER_LIGHT}; background: {C.FILL1};
+            }}
+        """)
+        btn_row.addWidget(del_btn)
+
+        # 清空全部按钮
+        clear_btn = QPushButton("清空全部")
+        clear_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.TEXT_SECONDARY}; background: {C.BG_CARD};
+                border: 1px solid {C.BORDER_LIGHT}; border-radius: 6px;
+                padding: 6px 16px; font-size: 13px;
+            }}
+            QPushButton:hover {{
+                color: {C.DANGER}; border-color: {C.DANGER}; background: {C.DANGER_LIGHT};
+            }}
+        """)
+        btn_row.addWidget(clear_btn)
+
+        # 关闭按钮
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PRIMARY}; color: #FFFFFF; border: none;
+                border-radius: 6px; padding: 6px 24px; font-size: 13px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {C.PRIMARY_HOVER}; }}
+        """)
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        main_layout.addLayout(btn_row)
+
+        # ── 数据加载逻辑 ──
+        _records_cache = []  # 缓存当前显示的记录列表
+
+        def format_size(n):
+            if n >= 10000:
+                return f"{n // 10000}万"
+            return str(n)
+
+        def refresh_table():
+            nonlocal _records_cache
+            keyword = search_le.text().strip()
+            _records_cache = history_db.get_all_records(keyword=keyword, limit=200)
+            table.setRowCount(len(_records_cache))
+            for i, rec in enumerate(_records_cache):
+                # 标题（截断过长）
+                title_text = rec.get('title', '无标题')
+                if len(title_text) > 40:
+                    title_text = title_text[:40] + "..."
+                item0 = QTableWidgetItem(title_text)
+                item0.setData(Qt.ItemDataRole.UserRole, rec['id'])
+                table.setItem(i, 0, item0)
+
+                # 语言对
+                table.setItem(i, 1, QTableWidgetItem(
+                    f"{rec.get('source_lang', '')} → {rec.get('target_lang', '')}"))
+
+                # 类型
+                rtype = rec.get('record_type', 'document')
+                type_text = "字幕" if rtype == 'subtitle' else "文档"
+                table.setItem(i, 2, QTableWidgetItem(type_text))
+
+                # 文件名
+                fname = rec.get('file_name', '') or "-"
+                if len(fname) > 18:
+                    fname = fname[:18] + "..."
+                table.setItem(i, 3, QTableWidgetItem(fname))
+
+                # 字数
+                src_len = rec.get('src_len', 0) or 0
+                table.setItem(i, 4, QTableWidgetItem(format_size(src_len)))
+
+                # 时间
+                created = rec.get('created_at', '')
+                if len(created) > 16:
+                    created = created[:16]
+                table.setItem(i, 5, QTableWidgetItem(created))
+
+            del_btn.setEnabled(False)
+
+        # ── 双击恢复 ──
+        def on_double_click(row, _col):
+            if row < 0 or row >= len(_records_cache):
+                return
+            rec_id = _records_cache[row]['id']
+            _restore_record(rec_id, dlg)
+
+        def on_restore_clicked():
+            rows = set(i.row() for i in table.selectedItems())
+            if not rows:
+                QMessageBox.warning(dlg, "提示", "请先选择一条翻译记录。")
+                return
+            row = min(rows)
+            if row < 0 or row >= len(_records_cache):
+                return
+            rec_id = _records_cache[row]['id']
+            _restore_record(rec_id, dlg)
+
+        def _restore_record(rec_id, parent_dlg):
+            """恢复翻译记录到主窗口。"""
+            rec = history_db.get_record(rec_id)
+            if not rec:
+                QMessageBox.warning(parent_dlg, "提示", "记录不存在或已被删除。")
+                return
+
+            self.last_source = rec.get('source_text', '') or ''
+            self.last_result = rec.get('result_text', '') or ''
+            self.last_analysis = rec.get('analysis', '') or ''
+            self.last_critique = rec.get('critique', '') or ''
+            self.file_type = rec.get('file_type', '') or None
+            self.file_path = rec.get('file_path', '') or None
+
+            # 恢复语言设置
+            src_lang = rec.get('source_lang', '')
+            tgt_lang = rec.get('target_lang', '')
+            if src_lang and hasattr(self, 'source_lang'):
+                idx = self.source_lang.findText(src_lang)
+                if idx >= 0:
+                    self.source_lang.setCurrentIndex(idx)
+            if tgt_lang and hasattr(self, 'target_lang'):
+                idx = self.target_lang.findText(tgt_lang)
+                if idx >= 0:
+                    self.target_lang.setCurrentIndex(idx)
+
+            # 填充UI
+            self.text_input.setPlainText(self.last_source)
+            self.analysis_output.setPlainText(self.last_analysis)
+            self.critique_output.setPlainText(self.last_critique)
+            self.result_output.setPlainText(self.last_result)
+
+            # 启用导出按钮
+            self.export_btn.setEnabled(bool(self.last_result))
+            self.export_term_btn.setEnabled(bool(self.last_analysis))
+            self.export_critique_btn.setEnabled(bool(self.last_critique))
+
+            if self.file_path and os.path.exists(self.file_path):
+                self.file_label.setText(f"已恢复：{os.path.basename(self.file_path)}")
+            else:
+                self.file_label.setText(f"已恢复历史记录")
+
+            # 切换到终稿 tab
+            self.result_tabs.setCurrentIndex(2)
+
+            # 如果是字幕记录，尝试恢复字幕对象
+            if rec.get('record_type') == 'subtitle' and rec.get('subtitle_data'):
+                try:
+                    from subtitle_handler import SubtitleEntry, SubtitleFile
+                    sub_file = SubtitleFile(format_type='srt')
+                    for d in rec['subtitle_data']:
+                        sub_file.entries.append(SubtitleEntry(
+                            index=d['index'],
+                            start_time=d['start_time'],
+                            end_time=d['end_time'],
+                            text=d['text'],
+                            translated=d.get('translated', ''),
+                        ))
+                    self.subtitle_obj = sub_file
+                    self.subtitle_path = rec.get('file_path', '') or None
+                    self.sub_export_btn.setEnabled(True)
+                except Exception as e:
+                    logger.warning(f"恢复字幕对象失败: {e}")
+
+            parent_dlg.accept()
+            QMessageBox.information(self, "已恢复",
+                f"翻译记录已恢复到工作区，可以直接导出。\n"
+                f"记录：{rec.get('title', '无标题')}")
+
+        def on_delete():
+            rows = set(i.row() for i in table.selectedItems())
+            if not rows:
+                QMessageBox.warning(dlg, "提示", "请先选择要删除的记录。")
+                return
+            ret = QMessageBox.question(dlg, "确认删除",
+                f"确定要删除选中的 {len(rows)} 条翻译记录吗？\n此操作不可撤销。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                ids_to_del = []
+                for row in rows:
+                    if row < len(_records_cache):
+                        ids_to_del.append(_records_cache[row]['id'])
+                if ids_to_del:
+                    history_db.delete_records_batch(ids_to_del)
+                refresh_table()
+
+        def on_clear_all():
+            ret = QMessageBox.question(dlg, "确认清空",
+                "确定要清空所有翻译记录吗？\n此操作不可撤销。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                history_db.clear_all_records()
+                refresh_table()
+
+        # ── 添加「恢复选中」按钮到删除按钮前面 ──
+        restore_btn = QPushButton("恢复选中")
+        restore_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C.PRIMARY}; color: #FFFFFF; border: none;
+                border-radius: 6px; padding: 6px 20px; font-size: 13px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {C.PRIMARY_HOVER}; }}
+            QPushButton:disabled {{
+                background: {C.FILL3}; color: {C.TEXT_DISABLED};
+            }}
+        """)
+        # 插入到 del_btn 之前
+        btn_row.insertWidget(0, restore_btn)
+
+        # 信号连接
+        restore_btn.clicked.connect(on_restore_clicked)
+        del_btn.clicked.connect(on_delete)
+        clear_btn.clicked.connect(on_clear_all)
+        table.cellDoubleClicked.connect(on_double_click)
+        search_le.textChanged.connect(refresh_table)
+        table.itemSelectionChanged.connect(
+            lambda: del_btn.setEnabled(bool(table.selectedItems())))
+
+        # 初始加载
+        refresh_table()
+        dlg.exec()
 
     def show_help(self):
         """显示使用说明弹窗"""
@@ -2523,6 +2992,7 @@ class MainWindow(QMainWindow):
 
         <h3>五、实用功能</h3>
         <ul>
+            <li><b>翻译历史</b>：翻译结果自动保存到本地数据库，关闭程序不丢失。点击右上角「翻译历史」按钮可浏览、恢复、删除历史记录，恢复后直接导出无需重新翻译</li>
             <li><b>取消翻译</b>：翻译过程中可随时点击红色「取消翻译」按钮</li>
             <li><b>术语库</b>：自动从分析报告提取术语，支持手动管理</li>
             <li><b>精简模式</b>：勾选后减少 API 调用量，节省成本</li>
@@ -2730,10 +3200,50 @@ class MainWindow(QMainWindow):
         fmt = dlg.get_fmt()
         mode = dlg.get_mode()
 
+        # ── 大文件警告 ──
+        if self.file_path and os.path.exists(self.file_path):
+            file_size_mb = os.path.getsize(self.file_path) / (1024 * 1024)
+            if file_size_mb > 100:
+                # PPT 双语备注/行内双语模式需要 python-pptx，大文件可能卡死
+                needs_python_pptx = (
+                    fmt in ("pptx", "ppt") and mode in ("bilingual_notes", "bilingual_inline")
+                )
+                needs_python_docx = (
+                    fmt in ("docx", "doc") and self.file_path
+                )
+                if needs_python_pptx:
+                    warn_msg = (
+                        f"原始文件 {file_size_mb:.0f}MB 较大，双语备注/行内双语模式需要加载整个文件到内存。\n\n"
+                        f"建议选择「替换译文」模式（轻量级，不加载图片）。\n\n"
+                        f"是否继续？"
+                    )
+                    ret = QMessageBox.warning(
+                        self, "大文件警告", warn_msg,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if ret == QMessageBox.StandardButton.No:
+                        return
+                elif needs_python_docx and file_size_mb > 500:
+                    warn_msg = (
+                        f"原始文件 {file_size_mb:.0f}MB 较大，导出 Word 时需要加载整个文件。\n\n"
+                        f"建议导出为 PDF 或 TXT 格式，或先复制原文文本再翻译。\n\n"
+                        f"是否继续？"
+                    )
+                    ret = QMessageBox.warning(
+                        self, "大文件警告", warn_msg,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                    if ret == QMessageBox.StandardButton.No:
+                        return
+
         # 在主线程弹出保存对话框（QFileDialog 不能在子线程调用）
         save_path = self._get_save_path(fmt)
         if not save_path:
             return  # 用户取消了
+
+        # 禁用导出按钮防止重复点击
+        self.export_btn.setEnabled(False)
+        self.progress_label.setText("正在导出，请稍候...")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
 
         # 启动导出线程，只做文件 I/O
         self._export_worker = _ExportWorker(
@@ -2744,8 +3254,6 @@ class MainWindow(QMainWindow):
         )
         self._export_worker.success.connect(self._on_export_success)
         self._export_worker.error.connect(self._on_export_error)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
         self._export_worker.start()
 
     def _get_save_path(self, fmt):
@@ -2779,10 +3287,14 @@ class MainWindow(QMainWindow):
 
     def _on_export_success(self, msg):
         self.progress_bar.setVisible(False)
+        self.progress_label.setText("")
+        self.export_btn.setEnabled(bool(self.last_result))
         QMessageBox.information(self, "导出成功", msg)
 
     def _on_export_error(self, msg):
         self.progress_bar.setVisible(False)
+        self.progress_label.setText("")
+        self.export_btn.setEnabled(bool(self.last_result))
         QMessageBox.critical(self, "错误", msg)
 
     # ═══════════════════════════════════════════════════════════
@@ -2953,6 +3465,8 @@ class MainWindow(QMainWindow):
         self.sub_export_btn.setEnabled(True)
         self.progress_label.setText("字幕翻译完成！")
         self.progress_bar.setValue(5)
+        # 自动保存字幕翻译记录到本地数据库
+        self._save_subtitle_record(subtitle)
 
         source_lang = self._get_source_lang()
         target_lang = self._get_target_lang()
