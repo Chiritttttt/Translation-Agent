@@ -940,7 +940,7 @@ Every [幻灯片 N/M] line must appear in your output. Output ALL slides, not ju
     return "\n\n".join(results)
 
 
-def _split_with_slide_awareness(text, max_len=6000):
+def _split_with_slide_awareness(text, max_len=80000):
     """分段：如果文本包含幻灯片标记，优先在幻灯片边界断开；
     否则按固定长度截断（兼容旧逻辑）。
     """
@@ -1652,6 +1652,142 @@ class ExportDialog(QDialog):
         for b in self.mode_group.buttons():
             if b.isChecked():
                 return b.property("val")
+
+
+class _ExportWorker(QThread):
+    """导出工作线程：将耗时的文件 I/O 放到后台，避免 UI 卡死。"""
+    success = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, fmt, mode, source, result, file_type, file_path):
+        super().__init__()
+        self.fmt = fmt
+        self.mode = mode
+        self.source = source
+        self.result = result
+        self.file_type = file_type
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            if self.fmt in ("docx", "doc"):
+                self._export_docx()
+            elif self.fmt in ("xlsx", "xls"):
+                self._export_xlsx()
+            elif self.fmt in ("pptx", "ppt"):
+                self._export_pptx()
+            elif self.fmt == "pdf":
+                self._export_pdf()
+            else:
+                self._export_txt()
+        except Exception as e:
+            self.error.emit(f"导出失败：{str(e)}")
+
+    def _default_name(self, ext):
+        if self.file_path and os.path.exists(self.file_path):
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+            return f"{base}_译文.{ext}"
+        return f"译文.{ext}"
+
+    def _export_docx(self):
+        from file_handler import (
+            export_docx_translation,
+            export_docx_bilingual,
+            export_docx_paragraph,
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            None, "保存", self._default_name("docx"), "Word 文档 (*.docx)")
+        if not path:
+            return
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+        if self.mode == "bilingual":
+            export_docx_bilingual(self.source, self.result, path,
+                                  original_path=self.file_path)
+        elif self.mode == "paragraph":
+            export_docx_paragraph(self.source, self.result, path,
+                                  original_path=self.file_path)
+        else:
+            export_docx_translation(self.result, path,
+                                    original_path=self.file_path)
+        self.success.emit(f"Word 文档已保存到：\n{path}")
+
+    def _export_xlsx(self):
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "译文"
+        ws.append(["原文", "译文"])
+        src_lines = self.source.split("\n")
+        tgt_lines = self.result.split("\n")
+        for s, t in zip(src_lines, tgt_lines):
+            ws.append([s, t])
+        path, _ = QFileDialog.getSaveFileName(
+            None, "保存", self._default_name("xlsx"), "Excel 文档 (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        wb.save(path)
+        self.success.emit(f"Excel 文档已保存到：\n{path}")
+
+    def _export_pptx(self):
+        from file_handler import (
+            export_pptx_translation,
+            export_pptx_bilingual,
+            export_pptx_bilingual_inline,
+        )
+        if not self.file_path or not os.path.exists(self.file_path):
+            self.error.emit(
+                "导出 PPT 需要原始文件来保留格式。\n"
+                "请使用「文件」标签页导入原始 PPT 后再翻译导出。\n\n"
+                "当前可导出为 Word / Excel / TXT 格式。"
+            )
+            return
+        original_path = self.file_path
+        default_name = os.path.splitext(os.path.basename(original_path))[0] + "_译文.pptx"
+        path, _ = QFileDialog.getSaveFileName(
+            None, "保存", default_name, "PowerPoint 文档 (*.pptx)")
+        if not path:
+            return
+        if not path.lower().endswith(".pptx"):
+            path += ".pptx"
+        if self.mode == "bilingual_notes":
+            export_pptx_bilingual(original_path, self.result, path)
+        elif self.mode == "bilingual_inline":
+            export_pptx_bilingual_inline(original_path, self.result, path)
+        else:
+            export_pptx_translation(original_path, self.result, path)
+        self.success.emit(f"PPT 已保存到：\n{path}")
+
+    def _export_pdf(self):
+        from file_handler import (
+            export_pdf_translation,
+            export_pdf_bilingual,
+            export_pdf_paragraph,
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            None, "保存", self._default_name("pdf"), "PDF 文档 (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        if self.mode == "bilingual":
+            export_pdf_bilingual(self.source, self.result, path)
+        elif self.mode == "paragraph":
+            export_pdf_paragraph(self.source, self.result, path)
+        else:
+            export_pdf_translation(self.result, path)
+        self.success.emit(f"PDF 文档已保存到：\n{path}")
+
+    def _export_txt(self):
+        path, _ = QFileDialog.getSaveFileName(
+            None, "保存", self._default_name("txt"), "文本文件 (*.txt)")
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.result)
+        self.success.emit(f"文本文件已保存到：\n{path}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2602,109 +2738,26 @@ class MainWindow(QMainWindow):
             return
         fmt = dlg.get_fmt()
         mode = dlg.get_mode()
-        try:
-            if fmt in ("docx", "doc"):
-                from docx import Document
-                from docx.shared import Pt
-                doc = Document()
-                if mode == "bilingual":
-                    doc.add_heading("双语对照", level=1)
-                    src_lines = self.last_source.split("\n")
-                    tgt_lines = self.last_result.split("\n")
-                    for s, t in zip(src_lines, tgt_lines):
-                        p = doc.add_paragraph()
-                        p.add_run(s).font.size = Pt(10)
-                        p = doc.add_paragraph()
-                        run = p.add_run(t)
-                        run.font.size = Pt(10)
-                        run.font.color.rgb = RGBColor(0x16, 0x5D, 0xFF)
-                elif mode == "translation":
-                    doc.add_paragraph(self.last_result)
-                else:
-                    doc.add_paragraph(self.last_result)
-                path, _ = QFileDialog.getSaveFileName(
-                    self, "保存", "译文.docx", "Word 文档 (*.docx)")
-                if path:
-                    doc.save(path)
-            elif fmt in ("xlsx", "xls"):
-                import openpyxl
-                wb = openpyxl.Workbook()
-                ws = wb.active
-                ws.title = "译文"
-                ws.append(["原文", "译文"])
-                src_lines = self.last_source.split("\n")
-                tgt_lines = self.last_result.split("\n")
-                for s, t in zip(src_lines, tgt_lines):
-                    ws.append([s, t])
-                path, _ = QFileDialog.getSaveFileName(
-                    self, "保存", "译文.xlsx", "Excel 文档 (*.xlsx)")
-                if path:
-                    wb.save(path)
-            elif fmt in ("pptx", "ppt"):
-                # ── PPT 导出（优化版：按页对位） ──
-                from file_handler import (
-                    export_pptx_translation,
-                    export_pptx_bilingual,
-                    export_pptx_bilingual_inline,
-                )
-                if not self.file_path or not os.path.exists(self.file_path):
-                    # 没有原始 PPT 文件，无法保留格式
-                    QMessageBox.warning(
-                        self, "提示",
-                        "导出 PPT 需要原始文件来保留格式。\n"
-                        "请使用「文件」标签页导入原始 PPT 后再翻译导出。\n\n"
-                        "当前可导出为 Word / Excel / TXT 格式。"
-                    )
-                    return
-                original_path = self.file_path
-                default_name = os.path.splitext(os.path.basename(original_path))[0] + "_译文.pptx"
-                path, _ = QFileDialog.getSaveFileName(
-                    self, "保存", default_name, "PowerPoint 文档 (*.pptx)")
-                if not path:
-                    return
-                if not path.lower().endswith(".pptx"):
-                    path += ".pptx"
-                try:
-                    if mode == "bilingual_notes":
-                        # 双语备注模式：正文保留原文，译文写入备注栏
-                        export_pptx_bilingual(original_path, self.last_result, path)
-                    elif mode == "bilingual_inline":
-                        # 行内双语模式：原文下方追加译文
-                        export_pptx_bilingual_inline(original_path, self.last_result, path)
-                    else:
-                        # 替换译文模式：保留格式只换文字
-                        export_pptx_translation(original_path, self.last_result, path)
-                    QMessageBox.information(self, "导出成功", f"PPT 已保存到：\n{path}")
-                except Exception as pptx_err:
-                    raise Exception(f"PPT 导出失败: {pptx_err}")
-            elif fmt == "pdf":
-                # ── PDF 导出 ──
-                from file_handler import (
-                    export_pdf_translation,
-                    export_pdf_bilingual,
-                    export_pdf_paragraph,
-                )
-                default_name = "译文.pdf"
-                path, _ = QFileDialog.getSaveFileName(
-                    self, "保存", default_name, "PDF 文档 (*.pdf)")
-                if not path:
-                    return
-                if not path.lower().endswith(".pdf"):
-                    path += ".pdf"
-                if mode == "bilingual":
-                    export_pdf_bilingual(self.last_source, self.last_result, path)
-                elif mode == "paragraph":
-                    export_pdf_paragraph(self.last_source, self.last_result, path)
-                else:
-                    export_pdf_translation(self.last_result, path)
-            else:
-                path, _ = QFileDialog.getSaveFileName(
-                    self, "保存", "译文.txt", "文本文件 (*.txt)")
-                if path:
-                    with open(path, "w", encoding="utf-8") as f:
-                        f.write(self.last_result)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败：{str(e)}")
+
+        # 启动导出线程，防止大文件导出时 UI 卡死
+        self._export_worker = _ExportWorker(
+            fmt=fmt, mode=mode,
+            source=self.last_source, result=self.last_result,
+            file_type=self.file_type, file_path=self.file_path,
+        )
+        self._export_worker.success.connect(self._on_export_success)
+        self._export_worker.error.connect(self._on_export_error)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self._export_worker.start()
+
+    def _on_export_success(self, msg):
+        self.progress_bar.setVisible(False)
+        QMessageBox.information(self, "导出成功", msg)
+
+    def _on_export_error(self, msg):
+        self.progress_bar.setVisible(False)
+        QMessageBox.critical(self, "错误", msg)
 
     # ═══════════════════════════════════════════════════════════
     # 复制结果
