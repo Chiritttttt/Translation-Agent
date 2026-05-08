@@ -1596,7 +1596,7 @@ class ExportDialog(QDialog):
             t_label.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {C.TEXT_PRIMARY}; background: transparent; border: none;")
             text_col.addWidget(t_label)
             d_label = QLabel(desc)
-            d_label.setStyleSheet(f"font-size: 11px; color: {C.TEXT_THIRD}; background: transparent; border: none;")
+            d_label.setStyleSheet(f"font-size: 11px; color: {C.TEXT_SECONDARY}; background: transparent; border: none;")
             d_label.setWordWrap(True)
             text_col.addWidget(d_label)
             opt_layout.addLayout(text_col, stretch=1)
