@@ -803,9 +803,11 @@ def _modify_slide_xml(xml_bytes, trans_lines):
     read_pptx 提取顺序是「标题 → 正文行」，译文也是同样顺序，
     因此必须分开匹配，否则会导致标题和正文错位。
 
+    标题检测方式：在每个 <a:p> 段落向前搜索 800 字符范围内是否有
+    <p:ph type="title"|"ctrTitle"|"subTitle"> 或 <p:ph idx="0">。
+
     原理：
     - PPTX 中文本存储在 <a:t> 标签中
-    - 标题占位符 <p:ph type="title" ...> 或 idx="0"
     - 按段落级别匹配原文与译文
     - 将译文写入段落第一个 <a:t>，其余清空
     - 全程操作 XML 字符串，不解析为对象，保留所有格式/命名空间
@@ -814,9 +816,6 @@ def _modify_slide_xml(xml_bytes, trans_lines):
 
     xml_str = xml_bytes.decode("utf-8")
 
-    # 分离译文的标题和正文（与 read_pptx 输出格式一致）
-    trans_title, trans_body_lines = _split_title_and_body(trans_lines)
-
     # 1. 找到所有 <a:t> 元素的位置
     t_pat = re.compile(r"(<a:t(?:\s[^>]*)?>)(.*?)(</a:t>)", re.DOTALL)
     all_t = list(t_pat.finditer(xml_str))
@@ -824,19 +823,14 @@ def _modify_slide_xml(xml_bytes, trans_lines):
     if not all_t:
         return xml_bytes
 
-    # 2. 按段落 <a:p> 分组，并识别是否为标题段落
-    #    找到所有 <a:p> ... </a:p> 的范围
-    p_open_matches = list(re.finditer(r"<a:p[\s>]", xml_str))
-    p_close_matches = list(re.finditer(r"</a:p>", xml_str))
-
-    p_open_pos = [m.start() for m in p_open_matches]
-    p_close_pos = [m.end() for m in p_close_matches]
+    # 2. 按段落 <a:p> 分组
+    p_open_pos = [m.start() for m in re.finditer(r"<a:p[\s>]", xml_str)]
+    p_close_pos = [m.end() for m in re.finditer(r"</a:p>", xml_str)]
 
     if len(p_open_pos) != len(p_close_pos):
         # 不匹配时退化：每个 <a:t> 独立替换
-        trans_all = trans_lines  # 直接使用全部译文行
         orig_texts = [m.group(2) for m in all_t]
-        matched = match_translation(orig_texts, "\n".join(trans_all))
+        matched = match_translation(orig_texts, "\n".join(trans_lines))
         result = xml_str
         for i in range(len(all_t) - 1, -1, -1):
             m = all_t[i]
@@ -844,36 +838,20 @@ def _modify_slide_xml(xml_bytes, trans_lines):
             result = result[:m.start(2)] + new_text + result[m.end(2):]
         return result.encode("utf-8")
 
-    # 3. 收集每个段落内的 <a:t> 信息，并判断是否为标题
-    #    标题特征：所在 <p:sp> 中包含 <p:ph type="title"|"ctrTitle"|"subTitle"> 或 idx="0"
+    # 3. 收集每个段落信息，并检测是否为标题段落
+    #    向前搜索 800 字符范围内找 <p:ph type="title"...>
+    _ph_title_re = re.compile(
+        r'<p:ph\b[^>]*type\s*=\s*["\'](?:title|ctrTitle|subTitle)["\']'
+        r'|<p:ph\b[^>]*idx\s*=\s*["\']0["\']',
+    )
     paragraphs = []  # [{"text": str, "runs": [...], "is_title": bool}, ...]
     t_idx = 0
 
-    for p_idx, (p_start, p_end) in enumerate(zip(p_open_pos, p_close_pos)):
-        # 判断此段落是否属于标题占位符
-        is_title = False
-        # 向上查找此段落所在的 shape 区域（从上一个 </p:sp> 或开头到当前段落）
-        shape_start = p_start
-        # 简化判断：向前找最近的 <p:sp 或 <p:sp> 标签
-        for k in range(p_idx, -1, -1):
-            sp_region_start = p_open_pos[k] if k == 0 else p_close_pos[k - 1]
-            sp_region_end = p_close_pos[k]
-            if p_start >= sp_region_start and p_start < sp_region_end:
-                shape_start = sp_region_start
-            else:
-                break
-
-        # 在 shape 区域中查找 placeholder 标记
-        # 取 shape 区域对应的 XML 片段（往前找 <p:sp 开始）
-        sp_start_match = re.search(r"<p:sp[\s>]", xml_str[:p_start + 1][::-1])
-        if sp_start_match:
-            actual_sp_start = p_start + 1 - sp_start_match.end()
-            shape_xml = xml_str[actual_sp_start:p_end]
-            # 标题占位符判断
-            if re.search(r'<p:ph\s[^>]*type\s*=\s*["\'](?:title|ctrTitle|subTitle)["\']', shape_xml):
-                is_title = True
-            elif re.search(r'<p:ph\s[^>]*idx\s*=\s*["\']0["\']', shape_xml):
-                is_title = True
+    for p_start, p_end in zip(p_open_pos, p_close_pos):
+        # 检测标题：向前找 <p:ph>（在当前 shape 内）
+        search_start = max(0, p_start - 800)
+        pre_text = xml_str[search_start:p_start]
+        is_title = bool(_ph_title_re.search(pre_text))
 
         # 收集此段落中的 <a:t>
         runs = []
@@ -891,21 +869,33 @@ def _modify_slide_xml(xml_bytes, trans_lines):
     if not paragraphs:
         return xml_bytes
 
-    # 4. 分离标题段落和正文字落，分别匹配译文
+    # 4. 检查是否检测到了标题段落
     title_paras = [p for p in paragraphs if p["is_title"]]
     body_paras = [p for p in paragraphs if not p["is_title"]]
 
-    # 标题匹配
-    title_matched = {}
-    if trans_title and title_paras:
-        title_matched[title_paras[0]["runs"][0][0]] = trans_title
+    if title_paras:
+        # ── 有标题占位符：标题和正文分开匹配 ──
+        trans_title, trans_body_lines = _split_title_and_body(trans_lines)
 
-    # 正文匹配：用 match_translation 将译文行与正文段落对齐
-    body_orig = [p["text"] for p in body_paras]
-    body_matched = {}
-    if body_paras and trans_body_lines:
-        matched_lines = match_translation(body_orig, "\n".join(trans_body_lines))
-        for i, bp in enumerate(body_paras):
+        title_matched = {}
+        if trans_title:
+            title_matched[title_paras[0]["runs"][0][0]] = trans_title
+
+        body_matched = {}
+        if body_paras and trans_body_lines:
+            body_orig = [p["text"] for p in body_paras]
+            matched_lines = match_translation(body_orig, "\n".join(trans_body_lines))
+            for i, bp in enumerate(body_paras):
+                if i < len(matched_lines):
+                    body_matched[bp["runs"][0][0]] = matched_lines[i]
+    else:
+        # ── 无标题占位符（自由布局/自定义模板）：所有段落统一匹配 ──
+        #    不拆分标题/正文，直接将全部译文行与全部段落匹配
+        title_matched = {}
+        body_matched = {}
+        all_orig = [p["text"] for p in paragraphs]
+        matched_lines = match_translation(all_orig, "\n".join(trans_lines))
+        for i, bp in enumerate(paragraphs):
             if i < len(matched_lines):
                 body_matched[bp["runs"][0][0]] = matched_lines[i]
 
@@ -919,11 +909,8 @@ def _modify_slide_xml(xml_bytes, trans_lines):
         first_run_start = runs[0][0]
 
         # 查找匹配的译文
-        if first_run_start in title_matched:
-            new_text = title_matched[first_run_start]
-        elif first_run_start in body_matched:
-            new_text = body_matched[first_run_start]
-        else:
+        new_text = title_matched.get(first_run_start) or body_matched.get(first_run_start)
+        if not new_text:
             # 无匹配译文，保留原文
             continue
 
