@@ -772,20 +772,176 @@ def _split_title_and_body(lines):
 # PPT 导出函数
 # ═══════════════════════════════════════════════════════════
 
+# ── 轻量级导出（zipfile 直接操作，不加载图片到内存） ──
+
+def _modify_slide_xml(xml_bytes, trans_lines):
+    """修改幻灯片 XML 中的文本内容，保留原始 XML 结构。
+
+    原理：
+    - PPTX 中文本存储在 <a:t> 标签中
+    - 多个 <a:t> 可能属于同一个段落 <a:p>
+    - 按段落级别匹配原文与译文
+    - 将译文写入段落第一个 <a:t>，其余清空
+    - 全程操作 XML 字符串，不解析为对象，保留所有格式/命名空间
+    """
+    import re
+
+    xml_str = xml_bytes.decode("utf-8")
+    trans_text = "\n".join(trans_lines)
+
+    # 1. 找到所有 <a:t> 元素的位置
+    t_pat = re.compile(r"(<a:t(?:\s[^>]*)?>)(.*?)(</a:t>)", re.DOTALL)
+    all_t = list(t_pat.finditer(xml_str))
+
+    if not all_t:
+        return xml_bytes
+
+    # 2. 按段落 <a:p> 分组 <a:t>
+    #    找到所有 <a:p> ... </a:p> 的范围
+    p_open_pos = [m.start() for m in re.finditer(r"<a:p[\s>]", xml_str)]
+    p_close_pos = [m.end() for m in re.finditer(r"</a:p>", xml_str)]
+
+    # 配对：每个 <a:p> 开头和 </a:p> 结尾
+    if len(p_open_pos) != len(p_close_pos):
+        # 不匹配时退化：每个 <a:t> 独立视为一段
+        orig_texts = [m.group(2) for m in all_t]
+        matched = match_translation(orig_texts, trans_text)
+        result = xml_str
+        for i in range(len(all_t) - 1, -1, -1):
+            m = all_t[i]
+            new_text = _xml_escape(matched[i]) if i < len(matched) else m.group(2)
+            result = result[:m.start(2)] + new_text + result[m.end(2):]
+        return result.encode("utf-8")
+
+    # 3. 收集每个段落内的 <a:t> 信息
+    paragraphs = []  # [{"text": str, "runs": [(start, end), ...]}, ...]
+    t_idx = 0
+
+    for p_start, p_end in zip(p_open_pos, p_close_pos):
+        runs = []
+        full_text = ""
+        while t_idx < len(all_t) and all_t[t_idx].start() < p_end:
+            m = all_t[t_idx]
+            content = m.group(2)
+            runs.append((m.start(2), m.end(2), content))
+            full_text += content
+            t_idx += 1
+
+        if full_text.strip() and runs:
+            paragraphs.append({"text": full_text, "runs": runs})
+
+    if not paragraphs:
+        return xml_bytes
+
+    # 4. 用 match_translation 按段落匹配译文
+    orig_texts = [p["text"] for p in paragraphs]
+    matched = match_translation(orig_texts, trans_text)
+
+    # 5. 替换：每段译文写入第一个 <a:t>，其余清空
+    #    从后往前替换，避免位置偏移
+    for i in range(len(paragraphs) - 1, -1, -1):
+        new_text = matched[i] if i < len(matched) else paragraphs[i]["text"]
+        escaped = _xml_escape(new_text)
+        runs = paragraphs[i]["runs"]
+
+        if not runs:
+            continue
+
+        # 第一个 <a:t> 写入完整译文
+        s, e, _ = runs[0]
+        xml_str = xml_str[:s] + escaped + xml_str[e:]
+
+        # 其余 <a:t> 清空
+        for j in range(len(runs) - 1, 0, -1):
+            rs, re_, _ = runs[j]
+            xml_str = xml_str[:rs] + xml_str[re_:]
+
+    return xml_str.encode("utf-8")
+
+
+def _xml_escape(text):
+    """转义 XML 特殊字符。"""
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def _export_pptx_zip(original_path, translated, output_path):
+    """轻量级 PPT 导出：使用 zipfile 直接操作 ZIP 结构。
+
+    优势：
+    - 不把图片/媒体加载到内存 → 支持超大文件
+    - 不用 python-pptx 解析整个文件 → 速度快
+    - 直接拷贝图片等二进制文件 → 零修改风险
+
+    仅修改 ppt/slides/slideN.xml 中的 <a:t> 文本节点。
+    """
+    import zipfile
+    import re
+    import tempfile
+    import shutil
+
+    # 解析译文
+    translated = _reconstruct_slide_markers(original_path, translated)
+    trans_slides = _parse_translated_slides(translated)
+
+    slide_re = re.compile(r"ppt/slides/slide(\d+)\.xml$")
+
+    with zipfile.ZipFile(original_path, "r") as zin:
+        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                # 只处理幻灯片 XML
+                sm = slide_re.match(item.filename)
+                if sm:
+                    slide_num = int(sm.group(1))
+                    if slide_num in trans_slides and trans_slides[slide_num]:
+                        data = zin.read(item.filename)
+                        modified = _modify_slide_xml(
+                            data, trans_slides[slide_num])
+                        zout.writestr(item, modified)
+                        continue
+
+                # 其他文件（图片、媒体等）→ 原样拷贝
+                # 大文件（>5MB）用临时文件避免内存占用
+                if item.file_size > 5 * 1024 * 1024:
+                    tmp_path = None
+                    try:
+                        fd, tmp_path = tempfile.mkstemp(suffix=".pptx_tmp")
+                        os.close(fd)
+                        with zin.open(item) as src, open(tmp_path, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        zout.write(
+                            tmp_path, item.filename,
+                            compress_type=item.compress_type)
+                    finally:
+                        if tmp_path and os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+
+
 def export_pptx_translation(original_path, translated, output_path):
     """全译文模式：保留格式，按页对位替换文字。
 
-    逻辑：
-    0. 兜底：如果 AI 丢失了幻灯片标记，根据原始 PPT 结构重建
-    1. 解析译文中的 [幻灯片 N] 标记，得到逐页译文
-    2. 遍历原始 PPT 每张幻灯片，收集段落
-    3. 用 match_translation() 按页对位（比例匹配，防止错位）
-    4. 替换文本，保留第一个 run 的格式
+    优先使用轻量级 zipfile 方式（不加载图片，适合大文件）。
+    如果 zipfile 方式失败，回退到 python-pptx。
     """
-    from pptx import Presentation
-
     # 兜底：确保译文中有幻灯片标记
     translated = _reconstruct_slide_markers(original_path, translated)
+
+    try:
+        _export_pptx_zip(original_path, translated, output_path)
+        return
+    except Exception:
+        pass
+
+    # 回退：使用 python-pptx
+    import gc
+    from pptx import Presentation
+
+    gc.collect()
     trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
 
@@ -822,7 +978,10 @@ def export_pptx_translation(original_path, translated, output_path):
 
 def export_pptx_bilingual(original_path, translated, output_path):
     """双语备注模式：正文保留原文，译文写入演讲者备注栏。"""
+    import gc
     from pptx import Presentation
+
+    gc.collect()
 
     # 兜底：确保译文中有幻灯片标记
     translated = _reconstruct_slide_markers(original_path, translated)
@@ -862,9 +1021,12 @@ def export_pptx_bilingual_inline(original_path, translated, output_path):
 
     使用 run 级别操作，保留原文格式，译文使用较小字号 + 灰色。
     """
+    import gc
     from pptx import Presentation
     from pptx.util import Pt
     from pptx.dml.color import RGBColor
+
+    gc.collect()
 
     # 兜底：确保译文中有幻灯片标记
     translated = _reconstruct_slide_markers(original_path, translated)
