@@ -1655,11 +1655,15 @@ class ExportDialog(QDialog):
 
 
 class _ExportWorker(QThread):
-    """导出工作线程：将耗时的文件 I/O 放到后台，避免 UI 卡死。"""
+    """导出工作线程：将耗时的文件 I/O 放到后台，避免 UI 卡死。
+
+    注意：QFileDialog 必须在主线程调用，不能放在子线程中。
+    因此保存路径在 do_export（主线程）中获取，通过 save_path 传入。
+    """
     success = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, fmt, mode, source, result, file_type, file_path):
+    def __init__(self, fmt, mode, source, result, file_type, file_path, save_path):
         super().__init__()
         self.fmt = fmt
         self.mode = mode
@@ -1667,9 +1671,12 @@ class _ExportWorker(QThread):
         self.result = result
         self.file_type = file_type
         self.file_path = file_path
+        self.save_path = save_path  # 主线程获取的保存路径
 
     def run(self):
         try:
+            if not self.save_path:
+                return  # 用户取消了保存对话框
             if self.fmt in ("docx", "doc"):
                 self._export_docx()
             elif self.fmt in ("xlsx", "xls"):
@@ -1683,24 +1690,13 @@ class _ExportWorker(QThread):
         except Exception as e:
             self.error.emit(f"导出失败：{str(e)}")
 
-    def _default_name(self, ext):
-        if self.file_path and os.path.exists(self.file_path):
-            base = os.path.splitext(os.path.basename(self.file_path))[0]
-            return f"{base}_译文.{ext}"
-        return f"译文.{ext}"
-
     def _export_docx(self):
         from file_handler import (
             export_docx_translation,
             export_docx_bilingual,
             export_docx_paragraph,
         )
-        path, _ = QFileDialog.getSaveFileName(
-            None, "保存", self._default_name("docx"), "Word 文档 (*.docx)")
-        if not path:
-            return
-        if not path.lower().endswith(".docx"):
-            path += ".docx"
+        path = self.save_path
         if self.mode == "bilingual":
             export_docx_bilingual(self.source, self.result, path,
                                   original_path=self.file_path)
@@ -1722,14 +1718,8 @@ class _ExportWorker(QThread):
         tgt_lines = self.result.split("\n")
         for s, t in zip(src_lines, tgt_lines):
             ws.append([s, t])
-        path, _ = QFileDialog.getSaveFileName(
-            None, "保存", self._default_name("xlsx"), "Excel 文档 (*.xlsx)")
-        if not path:
-            return
-        if not path.lower().endswith(".xlsx"):
-            path += ".xlsx"
-        wb.save(path)
-        self.success.emit(f"Excel 文档已保存到：\n{path}")
+        wb.save(self.save_path)
+        self.success.emit(f"Excel 文档已保存到：\n{self.save_path}")
 
     def _export_pptx(self):
         from file_handler import (
@@ -1745,13 +1735,7 @@ class _ExportWorker(QThread):
             )
             return
         original_path = self.file_path
-        default_name = os.path.splitext(os.path.basename(original_path))[0] + "_译文.pptx"
-        path, _ = QFileDialog.getSaveFileName(
-            None, "保存", default_name, "PowerPoint 文档 (*.pptx)")
-        if not path:
-            return
-        if not path.lower().endswith(".pptx"):
-            path += ".pptx"
+        path = self.save_path
         if self.mode == "bilingual_notes":
             export_pptx_bilingual(original_path, self.result, path)
         elif self.mode == "bilingual_inline":
@@ -1766,12 +1750,7 @@ class _ExportWorker(QThread):
             export_pdf_bilingual,
             export_pdf_paragraph,
         )
-        path, _ = QFileDialog.getSaveFileName(
-            None, "保存", self._default_name("pdf"), "PDF 文档 (*.pdf)")
-        if not path:
-            return
-        if not path.lower().endswith(".pdf"):
-            path += ".pdf"
+        path = self.save_path
         if self.mode == "bilingual":
             export_pdf_bilingual(self.source, self.result, path)
         elif self.mode == "paragraph":
@@ -1781,13 +1760,9 @@ class _ExportWorker(QThread):
         self.success.emit(f"PDF 文档已保存到：\n{path}")
 
     def _export_txt(self):
-        path, _ = QFileDialog.getSaveFileName(
-            None, "保存", self._default_name("txt"), "文本文件 (*.txt)")
-        if not path:
-            return
-        with open(path, "w", encoding="utf-8") as f:
+        with open(self.save_path, "w", encoding="utf-8") as f:
             f.write(self.result)
-        self.success.emit(f"文本文件已保存到：\n{path}")
+        self.success.emit(f"文本文件已保存到：\n{self.save_path}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2755,17 +2730,52 @@ class MainWindow(QMainWindow):
         fmt = dlg.get_fmt()
         mode = dlg.get_mode()
 
-        # 启动导出线程，防止大文件导出时 UI 卡死
+        # 在主线程弹出保存对话框（QFileDialog 不能在子线程调用）
+        save_path = self._get_save_path(fmt)
+        if not save_path:
+            return  # 用户取消了
+
+        # 启动导出线程，只做文件 I/O
         self._export_worker = _ExportWorker(
             fmt=fmt, mode=mode,
             source=self.last_source, result=self.last_result,
             file_type=self.file_type, file_path=self.file_path,
+            save_path=save_path,
         )
         self._export_worker.success.connect(self._on_export_success)
         self._export_worker.error.connect(self._on_export_error)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self._export_worker.start()
+
+    def _get_save_path(self, fmt):
+        """在主线程获取保存路径。"""
+        # 生成默认文件名
+        default_name = "译文"
+        if self.file_path and os.path.exists(self.file_path):
+            base = os.path.splitext(os.path.basename(self.file_path))[0]
+            default_name = f"{base}_译文"
+
+        ext_map = {
+            "docx": ("docx", "Word 文档 (*.docx)"),
+            "doc":  ("docx", "Word 文档 (*.docx)"),
+            "xlsx": ("xlsx", "Excel 文档 (*.xlsx)"),
+            "xls":  ("xlsx", "Excel 文档 (*.xlsx)"),
+            "pptx": ("pptx", "PowerPoint 文档 (*.pptx)"),
+            "ppt":  ("pptx", "PowerPoint 文档 (*.pptx)"),
+            "pdf":  ("pdf",  "PDF 文档 (*.pdf)"),
+            "txt":  ("txt",  "文本文件 (*.txt)"),
+        }
+        ext, filter_str = ext_map.get(fmt, ("txt", "文本文件 (*.txt)"))
+        default_name = f"{default_name}.{ext}"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存", default_name, filter_str)
+        if not path:
+            return ""
+        if not path.lower().endswith(f".{ext}"):
+            path += f".{ext}"
+        return path
 
     def _on_export_success(self, msg):
         self.progress_bar.setVisible(False)
