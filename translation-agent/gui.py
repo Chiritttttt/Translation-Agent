@@ -2389,6 +2389,8 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_term_btn.setEnabled(False)
         self.export_critique_btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 5)
         self.progress_bar.setValue(0)
         self.analysis_output.clear()
         self.critique_output.clear()
@@ -2412,6 +2414,10 @@ class MainWindow(QMainWindow):
     def on_progress(self, msg, step):
         self.progress_label.setText(msg)
         self.progress_bar.setValue(step)
+        # 翻译取消后进度条需要重新可见
+        if not self.progress_bar.isVisible():
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 5)
 
     def on_analysis_done(self, analysis):
         self.last_analysis = analysis
@@ -2438,20 +2444,30 @@ class MainWindow(QMainWindow):
 
     def on_error(self, msg):
         QMessageBox.critical(self, "错误", msg)
+        self._reset_to_idle()
+
+    def _reset_to_idle(self):
+        """恢复 UI 到空闲状态：可以重新上传文件、开始翻译。"""
+        self._cancelled = True  # 阻止后续信号处理
         self.progress_label.setText("")
+        self.progress_bar.setValue(0)
         self.translate_btn.setEnabled(True)
         self.translate_btn.setVisible(True)
         self.cancel_btn.setVisible(False)
+        self.cancel_btn.setEnabled(True)
+        self.export_btn.setEnabled(bool(self.last_result))
+        self.export_term_btn.setEnabled(bool(self.last_analysis))
+        self.export_critique_btn.setEnabled(bool(self.last_critique))
 
     def do_cancel(self):
-        """取消正在进行的翻译"""
+        """取消正在进行的翻译，恢复到可上传文件的状态。"""
         self._cancelled = True
         if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
             self.worker.cancel()
         if hasattr(self, 'subtitle_worker') and self.subtitle_worker and self.subtitle_worker.isRunning():
             self.subtitle_worker.cancel()
-        self.progress_label.setText("正在取消...")
-        self.cancel_btn.setEnabled(False)
+        self.progress_label.setText("已取消翻译")
+        self._reset_to_idle()
 
     def show_help(self):
         """显示使用说明弹窗"""
@@ -2896,16 +2912,16 @@ class MainWindow(QMainWindow):
     def _on_subtitle_progress(self, msg, step):
         self.progress_label.setText(msg)
         self.progress_bar.setValue(step)
+        if not self.progress_bar.isVisible():
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setRange(0, 5)
 
     def _on_subtitle_error(self, msg):
         if not self._cancelled:
             QMessageBox.critical(self, "字幕翻译错误", msg)
-        self.progress_label.setText("")
+        self._reset_to_idle()
         self.sub_translate_btn.setEnabled(True)
         self.sub_export_btn.setEnabled(True)
-        self.translate_btn.setEnabled(True)
-        self.translate_btn.setVisible(True)
-        self.cancel_btn.setVisible(False)
 
     def _on_subtitle_analysis_done(self, analysis):
         """第一步完成：实时显示 AI 分析报告到分析 tab"""
