@@ -642,9 +642,14 @@ def _extract_table_text(table):
 def _collect_slide_paragraphs(slide):
     """收集单张幻灯片中所有有文本的段落及其所属 shape 信息。
 
+    表格处理：与 read_pptx 的 _extract_table_text 保持一致，
+    按行输出 "cell1 | cell2 | cell3" 格式，而不是逐单元格。
+    每行对应一个条目，para 指向该行第一个单元格的第一个段落。
+
     Returns:
         list of dict: [
-            {"shape": shape, "para": para, "is_title": bool, "text": str},
+            {"shape": shape, "para": para, "is_title": bool, "text": str,
+             "is_table_row": bool, "row_cells": [para, ...]},
             ...
         ]
     """
@@ -658,19 +663,33 @@ def _collect_slide_paragraphs(slide):
                 result.append(item)
             continue
 
-        # 表格：按单元格收集
+        # 表格：按行收集（与 read_pptx _extract_table_text 一致）
         if shape.has_table:
             for row in shape.table.rows:
+                row_paras = []
+                row_texts = []
                 for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    # 取每个单元格的第一个有文本的段落
+                    first_para = None
                     for para in cell.text_frame.paragraphs:
                         if para.text.strip():
-                            result.append({
-                                "shape": shape,
-                                "para": para,
-                                "is_title": False,
-                                "text": para.text.strip(),
-                                "is_table_cell": True,
-                            })
+                            if first_para is None:
+                                first_para = para
+                            break
+                    row_paras.append(first_para)
+                    row_texts.append(cell_text if cell_text else "")
+
+                row_text = " | ".join(row_texts)
+                if row_text.strip():
+                    result.append({
+                        "shape": shape,
+                        "para": row_paras[0],  # 该行第一个有内容的段落
+                        "is_title": False,
+                        "text": row_text,
+                        "is_table_row": True,
+                        "row_cells": row_paras,
+                    })
             continue
 
         # 文本框
@@ -683,7 +702,8 @@ def _collect_slide_paragraphs(slide):
                         "para": para,
                         "is_title": is_title,
                         "text": para.text.strip(),
-                        "is_table_cell": False,
+                        "is_table_row": False,
+                        "row_cells": None,
                     })
 
     return result
@@ -1245,19 +1265,45 @@ def _export_pptx_zip(original_path, translated, output_path):
 def export_pptx_translation(original_path, translated, output_path):
     """全译文模式：保留格式，按页对位替换文字。
 
-    优先使用轻量级 zipfile 方式（不加载图片，适合大文件）。
-    如果 zipfile 方式失败，回退到 python-pptx。
+    优先使用 python-pptx（准确识别文本框/表格/组合形状结构）。
+    仅在文件 >200MB 或 python-pptx 失败时回退到 zipfile 方式。
     """
     # 兜底：确保译文中有幻灯片标记
     translated = _reconstruct_slide_markers(original_path, translated)
 
+    import gc
+    import os
+
+    file_size_mb = os.path.getsize(original_path) / (1024 * 1024)
+
+    # 优先使用 python-pptx（准确），超大文件才用 zipfile
+    if file_size_mb <= 200:
+        try:
+            _export_pptx_python_pptx(original_path, translated, output_path)
+            return
+        except Exception:
+            pass
+
+    # 回退：zipfile 方式（不加载图片，适合超大文件）
     try:
+        gc.collect()
         _export_pptx_zip(original_path, translated, output_path)
         return
     except Exception:
         pass
 
-    # 回退：使用 python-pptx
+    # 最后兜底：再试 python-pptx
+    gc.collect()
+    _export_pptx_python_pptx(original_path, translated, output_path)
+
+
+def _export_pptx_python_pptx(original_path, translated, output_path):
+    """使用 python-pptx 导出 PPT 翻译，准确识别文本结构。
+
+    - 正确处理标题、正文、表格、组合形状
+    - 表格按行匹配（与 read_pptx 的行级提取一致）
+    - 使用 match_translation 智能对齐译文
+    """
     import gc
     from pptx import Presentation
 
@@ -1273,11 +1319,10 @@ def export_pptx_translation(original_path, translated, output_path):
 
         # 获取对应页的译文行
         trans_lines = trans_slides.get(slide_idx, [])
+        if not trans_lines:
+            continue
 
         # 分离标题和正文
-        orig_titles = [p["text"] for p in orig_paras if p["is_title"]]
-        orig_bodies = [p["text"] for p in orig_paras if not p["is_title"]]
-
         trans_title, trans_body_lines = _split_title_and_body(trans_lines)
 
         # ── 标题替换 ──
@@ -1285,13 +1330,30 @@ def export_pptx_translation(original_path, translated, output_path):
         if trans_title and title_paras:
             _replace_para_text(title_paras[0]["para"], trans_title)
 
-        # ── 正文替换：按比例对位 ──
+        # ── 正文替换（含表格行） ──
         body_paras = [p for p in orig_paras if not p["is_title"]]
         if body_paras and trans_body_lines:
+            orig_bodies = [p["text"] for p in body_paras]
             matched = match_translation(orig_bodies, "\n".join(trans_body_lines))
+
             for i, bp in enumerate(body_paras):
-                if i < len(matched):
-                    _replace_para_text(bp["para"], matched[i])
+                if i >= len(matched):
+                    break
+                matched_text = matched[i]
+                if not matched_text or not matched_text.strip():
+                    # 译文为空，保留原文
+                    continue
+
+                if bp.get("is_table_row") and bp.get("row_cells"):
+                    # 表格行：按 " | " 拆分译文，写回各单元格
+                    cells = matched_text.split(" | ")
+                    row_paras = bp["row_cells"]
+                    for ci, cell_para in enumerate(row_paras):
+                        if cell_para and ci < len(cells):
+                            _replace_para_text(cell_para, cells[ci].strip())
+                else:
+                    # 普通段落
+                    _replace_para_text(bp["para"], matched_text)
 
     prs.save(output_path)
 
