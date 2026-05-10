@@ -1940,9 +1940,12 @@ class _ExportWorker(QThread):
     def run(self):
         try:
             import gc
+            import logging
+            logger = logging.getLogger('TranslationAgent')
             gc.collect()  # 导出前清理内存
             if not self.save_path:
                 return  # 用户取消了保存对话框
+            logger.info(f"导出线程启动: fmt={self.fmt}, mode={self.mode}, path={self.save_path}")
             if self.fmt in ("docx", "doc"):
                 self._export_docx()
             elif self.fmt in ("xlsx", "xls"):
@@ -1954,7 +1957,10 @@ class _ExportWorker(QThread):
             else:
                 self._export_txt()
             gc.collect()  # 导出后清理内存
+            logger.info("导出线程完成")
         except Exception as e:
+            import logging
+            logging.getLogger('TranslationAgent').error(f"导出异常: {e}", exc_info=True)
             self.error.emit(f"导出失败：{str(e)}")
 
     def _export_docx(self):

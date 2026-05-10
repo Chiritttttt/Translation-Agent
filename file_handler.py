@@ -925,6 +925,7 @@ def _estimate_char_limit(para, shape_width_emu=None):
     """根据字体大小和形状宽度估算段落可容纳的字符上限。
 
     用于检测译文是否超出文本框，触发自动压缩。
+    注意：估算值应偏宽松，避免对正常长度的译文频繁触发 LLM 压缩。
     """
     # 取该段落中最大的字号作为参考
     max_pt = 18  # 默认 18pt
@@ -939,29 +940,46 @@ def _estimate_char_limit(para, shape_width_emu=None):
 
     # 根据形状宽度调整（如果可用）
     # PPT 默认幻灯片宽度约 9144000 EMU = 25.4cm
-    base_chars = 80  # 默认值
+    base_chars = 500  # 默认宽松值，避免频繁触发压缩
 
     if shape_width_emu and shape_width_emu > 0:
-        # 宽度越大，能容纳的字符越多（按比例估算）
         import math
         width_inches = shape_width_emu / 914400  # EMU to inches
         # 每英寸大约能放 (72/pt) 个字符（经验公式）
         chars_per_line = int(width_inches * (72 / max_pt))
-        # 假设平均 2-3 行
-        base_chars = chars_per_line * 2
+        # PPT 文本框通常可容纳 3-5 行，按 4 行估算
+        base_chars = chars_per_line * 4
 
-    # 字号越大，可容纳字符越少
-    estimated = max(10, int(200 / max_pt * 10))
+    # 字号越大，可容纳字符越少（宽松估算）
+    estimated = max(50, int(500 / max_pt * 18))
     return max(estimated, base_chars) if shape_width_emu else estimated
+
+
+# 全局计数器：限制导出过程中的 LLM 压缩调用次数
+_compress_call_count = 0
+_compress_max_calls = 20  # 最多允许 20 次 LLM 压缩调用
 
 
 def _compress_overflow(translated_text, max_chars, target_lang):
     """当译文超出字符上限时，调用 LLM 压缩。
 
     保持完整含义，不使用省略号，直接精简表达。
+    安全机制：
+    - 全局限制最大调用次数（避免大量 LLM 调用导致导出极慢）
+    - 30 秒超时（避免 API 无响应时挂死）
+    - 超过限制后直接截断
     """
+    global _compress_call_count
     import openai
-    import os
+    import logging
+
+    logger = logging.getLogger('TranslationAgent')
+
+    # 安全限制：超过最大调用次数后直接截断
+    _compress_call_count += 1
+    if _compress_call_count > _compress_max_calls:
+        logger.warning(f"压缩调用已达上限 ({_compress_max_calls})，直接截断")
+        return translated_text[:max_chars]
 
     api_key = os.getenv("OPENAI_API_KEY", "")
     base_url = os.getenv("OPENAI_BASE_URL", "") or None
@@ -971,7 +989,14 @@ def _compress_overflow(translated_text, max_chars, target_lang):
         return translated_text[:max_chars]  # 无 API key 时直接截断
 
     try:
-        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        client = openai.OpenAI(
+            api_key=api_key, base_url=base_url,
+            timeout=30.0,  # 30 秒超时，防止 API 无响应时挂死
+        )
+        logger.info(
+            f"LLM 压缩 [{_compress_call_count}/{_compress_max_calls}]: "
+            f"{len(translated_text)} → ≤{max_chars} 字符"
+        )
         resp = client.chat.completions.create(
             model=model,
             temperature=0.3,
@@ -992,8 +1017,8 @@ def _compress_overflow(translated_text, max_chars, target_lang):
         compressed = resp.choices[0].message.content.strip()
         if compressed and len(compressed) <= max_chars * 1.2:
             return compressed[:max_chars]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"LLM 压缩失败: {e}，直接截断")
 
     return translated_text[:max_chars]
 
@@ -1132,6 +1157,12 @@ def parse_pptx_json_response(ai_output):
     return None
 
 
+def _reset_compress_counter():
+    """重置压缩调用计数器，每次导出前调用。"""
+    global _compress_call_count
+    _compress_call_count = 0
+
+
 def export_pptx_json(original_path, translated_json_or_dict, structure_index,
                      output_path, target_lang=None):
     """基于 JSON key 映射导出 PPT 翻译。
@@ -1140,7 +1171,7 @@ def export_pptx_json(original_path, translated_json_or_dict, structure_index,
     - 重新打开原始 PPT（不保留内存中的 Presentation 对象）
     - 按页收集段落，与 structure_index 按序匹配
     - runs[0].text = 译文, runs[1:].text = ""
-    - 超限检测 + LLM 自动压缩
+    - 超限检测 + LLM 自动压缩（有次数限制和超时保护）
 
     Args:
         original_path: 原始 PPT 文件路径
@@ -1155,6 +1186,8 @@ def export_pptx_json(original_path, translated_json_or_dict, structure_index,
     from pptx import Presentation
 
     logger = logging.getLogger('TranslationAgent')
+    _reset_compress_counter()  # 每次导出前重置压缩计数器
+    logger.info(f"开始 JSON 模式导出 PPT: {original_path}")
 
     # 解析译文 JSON
     if isinstance(translated_json_or_dict, dict):
@@ -1166,7 +1199,9 @@ def export_pptx_json(original_path, translated_json_or_dict, structure_index,
         raise ValueError("无法解析 AI 译文 JSON，请检查输出格式")
 
     gc.collect()
+    logger.info("正在加载 PPT 文件...")
     prs = Presentation(original_path)
+    logger.info(f"PPT 加载完成，共 {len(prs.slides)} 页")
 
     overflow_count = 0
 
@@ -1222,7 +1257,9 @@ def export_pptx_json(original_path, translated_json_or_dict, structure_index,
     if overflow_count > 0:
         logger.info(f"共 {overflow_count} 处译文超出文本框限制，已自动压缩")
 
+    logger.info("正在保存 PPT 文件...")
     prs.save(output_path)
+    logger.info("JSON 模式 PPT 导出完成")
 
 
 def split_pptx_json_chunks(json_text, max_keys_per_chunk=80):
@@ -1689,13 +1726,17 @@ def export_pptx_translation(original_path, translated, output_path,
     import logging
 
     logger = logging.getLogger('TranslationAgent')
+    _reset_compress_counter()  # 每次导出前重置压缩计数器
     file_size_mb = os.path.getsize(original_path) / (1024 * 1024)
+    logger.info(f"开始 PPT 导出: {original_path} ({file_size_mb:.1f}MB)")
 
     # ── 级别 1：小文件直接用 python-pptx ──
     if file_size_mb <= 200:
         try:
+            logger.info("使用 python-pptx 模式导出...")
             _export_pptx_python_pptx(original_path, translated, output_path,
                                      target_lang=target_lang)
+            logger.info("PPT 导出完成")
             return
         except MemoryError:
             logger.warning(f"PPT {file_size_mb:.0f}MB 内存不足，切换到 zipfile 模式")
@@ -1756,13 +1797,16 @@ def _export_pptx_python_pptx(original_path, translated, output_path,
     from pptx import Presentation
 
     logger = logging.getLogger('TranslationAgent')
+    _reset_compress_counter()
     gc.collect()
     trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
+    logger.info(f"python-pptx 模式: 共 {len(prs.slides)} 页，译文包含 {len(trans_slides)} 页")
 
     overflow_count = 0
 
     for slide_idx, slide in enumerate(prs.slides, 1):
+        logger.info(f"处理幻灯片 {slide_idx}/{len(prs.slides)}...")
         # ── 段落级提取：保留 para 引用 + char_limit ──
         orig_paras = _collect_slide_paragraphs(slide)
         if not orig_paras:
@@ -1826,7 +1870,9 @@ def _export_pptx_python_pptx(original_path, translated, output_path,
     if overflow_count > 0:
         logger.info(f"共 {overflow_count} 处译文超出文本框限制，已自动压缩")
 
+    logger.info("正在保存 PPT 文件...")
     prs.save(output_path)
+    logger.info("PPT 文件保存完成")
 
 
 def export_pptx_bilingual(original_path, translated, output_path):
