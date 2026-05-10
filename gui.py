@@ -1796,7 +1796,8 @@ class _ExportWorker(QThread):
     success = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, fmt, mode, source, result, file_type, file_path, save_path):
+    def __init__(self, fmt, mode, source, result, file_type, file_path, save_path,
+                 target_lang=None):
         super().__init__()
         self.fmt = fmt
         self.mode = mode
@@ -1805,6 +1806,7 @@ class _ExportWorker(QThread):
         self.file_type = file_type
         self.file_path = file_path
         self.save_path = save_path  # 主线程获取的保存路径
+        self.target_lang = target_lang
 
     def run(self):
         try:
@@ -1890,7 +1892,8 @@ class _ExportWorker(QThread):
         elif self.mode == "bilingual_inline":
             export_pptx_bilingual_inline(original_path, export_result, path)
         else:
-            export_pptx_translation(original_path, export_result, path)
+            export_pptx_translation(original_path, export_result, path,
+                                    target_lang=self.target_lang)
         self.success.emit(f"PPT 已保存到：\n{path}")
 
     def _export_pdf(self):
@@ -3388,6 +3391,7 @@ class MainWindow(QMainWindow):
             source=self.last_source, result=self.last_result,
             file_type=self.file_type, file_path=self.file_path,
             save_path=save_path,
+            target_lang=self.target_lang.currentText() if hasattr(self, 'target_lang') else None,
         )
         self._export_worker.success.connect(self._on_export_success)
         self._export_worker.error.connect(self._on_export_error)

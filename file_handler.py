@@ -642,14 +642,14 @@ def _extract_table_text(table):
 def _collect_slide_paragraphs(slide):
     """收集单张幻灯片中所有有文本的段落及其所属 shape 信息。
 
-    表格处理：与 read_pptx 的 _extract_table_text 保持一致，
-    按行输出 "cell1 | cell2 | cell3" 格式，而不是逐单元格。
-    每行对应一个条目，para 指向该行第一个单元格的第一个段落。
+    段落级提取，保留 para 引用。
+    表格按行提取（与 read_pptx _extract_table_text 的 "cell1 | cell2" 格式一致）。
 
     Returns:
         list of dict: [
             {"shape": shape, "para": para, "is_title": bool, "text": str,
-             "is_table_row": bool, "row_cells": [para, ...]},
+             "is_table_row": bool, "row_cells": [para, ...],
+             "char_limit": int, "shape_width_emu": int},
             ...
         ]
     """
@@ -662,6 +662,14 @@ def _collect_slide_paragraphs(slide):
             for item in _collect_group_paragraphs(shape):
                 result.append(item)
             continue
+
+        # 获取形状宽度（用于估算字符上限）
+        shape_width_emu = None
+        try:
+            if hasattr(shape, "width") and shape.width:
+                shape_width_emu = shape.width
+        except Exception:
+            pass
 
         # 表格：按行收集（与 read_pptx _extract_table_text 一致）
         if shape.has_table:
@@ -689,6 +697,8 @@ def _collect_slide_paragraphs(slide):
                         "text": row_text,
                         "is_table_row": True,
                         "row_cells": row_paras,
+                        "char_limit": 500,  # 表格行不做压缩
+                        "shape_width_emu": shape_width_emu,
                     })
             continue
 
@@ -697,6 +707,7 @@ def _collect_slide_paragraphs(slide):
             is_title = _is_title_shape(shape)
             for para in shape.text_frame.paragraphs:
                 if para.text.strip():
+                    char_limit = _estimate_char_limit(para, shape_width_emu)
                     result.append({
                         "shape": shape,
                         "para": para,
@@ -704,6 +715,8 @@ def _collect_slide_paragraphs(slide):
                         "text": para.text.strip(),
                         "is_table_row": False,
                         "row_cells": None,
+                        "char_limit": char_limit,
+                        "shape_width_emu": shape_width_emu,
                     })
 
     return result
@@ -866,13 +879,95 @@ def _parse_translated_slides(text):
 
 
 def _replace_para_text(para, new_text):
-    """替换段落文本，保留第一个 run 的格式。"""
+    """替换段落文本，保留第一个 run 的格式。
+
+    核心原则：只动 <a:t> 的 text content，<a:rPr> 完全不动。
+    - 第一个 run 写入全部译文
+    - 其余 run 清空（保留节点，不删除，避免破坏 XML 结构）
+    """
     if para.runs:
         para.runs[0].text = new_text
         for run in para.runs[1:]:
             run.text = ""
     else:
         para.text = new_text
+
+
+def _estimate_char_limit(para, shape_width_emu=None):
+    """根据字体大小和形状宽度估算段落可容纳的字符上限。
+
+    用于检测译文是否超出文本框，触发自动压缩。
+    """
+    # 取该段落中最大的字号作为参考
+    max_pt = 18  # 默认 18pt
+    for run in para.runs:
+        if run.font.size:
+            try:
+                pt = run.font.size.pt
+                if pt > 0:
+                    max_pt = pt
+            except Exception:
+                pass
+
+    # 根据形状宽度调整（如果可用）
+    # PPT 默认幻灯片宽度约 9144000 EMU = 25.4cm
+    base_chars = 80  # 默认值
+
+    if shape_width_emu and shape_width_emu > 0:
+        # 宽度越大，能容纳的字符越多（按比例估算）
+        import math
+        width_inches = shape_width_emu / 914400  # EMU to inches
+        # 每英寸大约能放 (72/pt) 个字符（经验公式）
+        chars_per_line = int(width_inches * (72 / max_pt))
+        # 假设平均 2-3 行
+        base_chars = chars_per_line * 2
+
+    # 字号越大，可容纳字符越少
+    estimated = max(10, int(200 / max_pt * 10))
+    return max(estimated, base_chars) if shape_width_emu else estimated
+
+
+def _compress_overflow(translated_text, max_chars, target_lang):
+    """当译文超出字符上限时，调用 LLM 压缩。
+
+    保持完整含义，不使用省略号，直接精简表达。
+    """
+    import openai
+    import os
+
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    base_url = os.getenv("OPENAI_BASE_URL", "") or None
+    model = os.getenv("OPENAI_MODEL", "deepseek-chat")
+
+    if not api_key:
+        return translated_text[:max_chars]  # 无 API key 时直接截断
+
+    try:
+        client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.3,
+            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "16384")),
+            messages=[
+                {"role": "system", "content": (
+                    f"You are a text compression expert for {target_lang} PowerPoint slides. "
+                    "Shorten text to fit character limits. "
+                    "Keep FULL meaning. No ellipsis (...). No omission. "
+                    "Use key phrases, remove filler words, restructure grammar. "
+                    "Return ONLY the compressed text, nothing else."
+                )},
+                {"role": "user", "content": (
+                    f"Compress to ≤{max_chars} characters:\n\n{translated_text}"
+                )},
+            ],
+        )
+        compressed = resp.choices[0].message.content.strip()
+        if compressed and len(compressed) <= max_chars * 1.2:
+            return compressed[:max_chars]
+    except Exception:
+        pass
+
+    return translated_text[:max_chars]
 
 
 def _split_title_and_body(lines):
@@ -1262,7 +1357,8 @@ def _export_pptx_zip(original_path, translated, output_path):
                     zout.writestr(item, zin.read(item.filename))
 
 
-def export_pptx_translation(original_path, translated, output_path):
+def export_pptx_translation(original_path, translated, output_path,
+                             target_lang=None):
     """全译文模式：保留格式，按页对位替换文字。
 
     优先使用 python-pptx（准确识别文本框/表格/组合形状结构）。
@@ -1279,7 +1375,8 @@ def export_pptx_translation(original_path, translated, output_path):
     # 优先使用 python-pptx（准确），超大文件才用 zipfile
     if file_size_mb <= 200:
         try:
-            _export_pptx_python_pptx(original_path, translated, output_path)
+            _export_pptx_python_pptx(original_path, translated, output_path,
+                                     target_lang=target_lang)
             return
         except Exception:
             pass
@@ -1294,25 +1391,39 @@ def export_pptx_translation(original_path, translated, output_path):
 
     # 最后兜底：再试 python-pptx
     gc.collect()
-    _export_pptx_python_pptx(original_path, translated, output_path)
+    _export_pptx_python_pptx(original_path, translated, output_path,
+                             target_lang=target_lang)
 
 
-def _export_pptx_python_pptx(original_path, translated, output_path):
+def _export_pptx_python_pptx(original_path, translated, output_path,
+                              target_lang=None):
     """使用 python-pptx 导出 PPT 翻译，准确识别文本结构。
 
-    - 正确处理标题、正文、表格、组合形状
-    - 表格按行匹配（与 read_pptx 的行级提取一致）
-    - 使用 match_translation 智能对齐译文
+    核心原则：只动 <a:t> 文字节点，其他全不碰。
+
+    完整流程：
+    1. python-pptx 解析，按段落提取文本，保留 para 引用 + char_limit
+    2. 按页匹配译文 → match_translation 智能对齐
+    3. 检测超限（译文 > char_limit）→ 调用 LLM 二次压缩
+    4. 通过 para_ref 回写：runs[0].text = 译文，runs[1:].text = ""
+    5. prs.save() → 格式 100% 保留
+
+    绝对不碰：a:rPr（字体/颜色/加粗）、a:pPr（对齐/间距）、
+    p:sp（位置/大小）、图片/图表/SmartArt。
     """
     import gc
+    import logging
     from pptx import Presentation
 
+    logger = logging.getLogger('TranslationAgent')
     gc.collect()
     trans_slides = _parse_translated_slides(translated)
     prs = Presentation(original_path)
 
+    overflow_count = 0
+
     for slide_idx, slide in enumerate(prs.slides, 1):
-        # 收集原始段落
+        # ── 段落级提取：保留 para 引用 + char_limit ──
         orig_paras = _collect_slide_paragraphs(slide)
         if not orig_paras:
             continue
@@ -1328,7 +1439,8 @@ def _export_pptx_python_pptx(original_path, translated, output_path):
         # ── 标题替换 ──
         title_paras = [p for p in orig_paras if p["is_title"]]
         if trans_title and title_paras:
-            _replace_para_text(title_paras[0]["para"], trans_title)
+            title_bp = title_paras[0]
+            _replace_para_text(title_bp["para"], trans_title)
 
         # ── 正文替换（含表格行） ──
         body_paras = [p for p in orig_paras if not p["is_title"]]
@@ -1340,20 +1452,39 @@ def _export_pptx_python_pptx(original_path, translated, output_path):
                 if i >= len(matched):
                     break
                 matched_text = matched[i]
+
+                # ── 安全检查：译文为空则保留原文 ──
                 if not matched_text or not matched_text.strip():
-                    # 译文为空，保留原文
                     continue
 
+                # ── 超限检测 + 自动压缩 ──
+                char_limit = bp.get("char_limit", 500)
+                if len(matched_text) > char_limit and not bp.get("is_table_row"):
+                    overflow_count += 1
+                    lang = target_lang or "Chinese"
+                    logger.info(
+                        f"幻灯片 {slide_idx}: 译文 {len(matched_text)} 字符"
+                        f" 超出上限 {char_limit}，自动压缩"
+                    )
+                    matched_text = _compress_overflow(
+                        matched_text, char_limit, lang)
+
+                # ── 回写：只动 <a:t>，不动任何格式属性 ──
                 if bp.get("is_table_row") and bp.get("row_cells"):
                     # 表格行：按 " | " 拆分译文，写回各单元格
                     cells = matched_text.split(" | ")
                     row_paras = bp["row_cells"]
                     for ci, cell_para in enumerate(row_paras):
                         if cell_para and ci < len(cells):
-                            _replace_para_text(cell_para, cells[ci].strip())
+                            cell_text = cells[ci].strip()
+                            if cell_text:
+                                _replace_para_text(cell_para, cell_text)
                 else:
-                    # 普通段落
+                    # 普通段落：runs[0].text = 译文, runs[1:].text = ""
                     _replace_para_text(bp["para"], matched_text)
+
+    if overflow_count > 0:
+        logger.info(f"共 {overflow_count} 处译文超出文本框限制，已自动压缩")
 
     prs.save(output_path)
 
