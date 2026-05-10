@@ -266,8 +266,8 @@ def read_file(file_path):
 
     返回: (file_type, content, extra)
       - file_type: 'pdf' | 'docx' | 'pptx' | 'xlsx' | 'txt'
-      - content: 提取的文本
-      - extra: Excel 时为行数据列表 [[cell, ...], ...]，其他格式为 None
+      - content: 提取的文本（PPT 返回 JSON 格式）
+      - extra: Excel 时为行数据列表；PPT 时为 structure_index 列表；其他为 None
     """
     ext = file_path.lower().split(".")[-1]
     if ext == "pdf":
@@ -275,7 +275,9 @@ def read_file(file_path):
     elif ext in ["docx", "doc"]:
         return "docx", read_docx(file_path), None
     elif ext in ["pptx", "ppt"]:
-        return "pptx", read_pptx(file_path), None
+        # PPT 使用 JSON 结构化提取，彻底消除标记丢失风险
+        json_text, structure_index = read_pptx_json(file_path)
+        return "pptx", json_text, structure_index
     elif ext in ["xlsx", "xls"]:
         return "xlsx", read_excel(file_path), None
     else:
@@ -326,6 +328,20 @@ def match_translation(original_lines, translated_text):
     return result
 
 
+def _detect_cjk_ratio(text):
+    """检测文本中 CJK 字符的占比。用于语言感知的翻译对齐。"""
+    if not text:
+        return 0.0
+    cjk_count = sum(
+        1 for c in text
+        if '\u4e00' <= c <= '\u9fff'
+        or '\u3040' <= c <= '\u30ff'
+        or '\uac00' <= c <= '\ud7af'
+        or '\u3400' <= c <= '\u4dbf'
+    )
+    return cjk_count / len(text)
+
+
 def _lcs_align(orig_lines, trans_lines):
     """基于 LCS 的智能对齐。
 
@@ -361,6 +377,18 @@ def _lcs_align(orig_lines, trans_lines):
     if total_trans_chars == 0:
         return None
 
+    # 语言感知比例调整：CJK→英文时译文通常更长
+    # 检测原文是否以 CJK 为主
+    cjk_ratio = _detect_cjk_ratio("\n".join(orig_lines))
+    length_factor = 1.0
+    if cjk_ratio > 0.3:
+        # CJK→非CJK：译文预期更长，给每段更多译文字符预算
+        target_cjk = _detect_cjk_ratio("\n".join(trans_lines))
+        if target_cjk < 0.3:
+            length_factor = 1.4  # 中→英/日→英 等，译文预期长 40%
+        else:
+            length_factor = 1.1  # 中→日 等相近语言
+
     # 按字符比例分配：每段原文应分到的字符数
     result = []
     trans_char_budget = 0.0
@@ -368,9 +396,9 @@ def _lcs_align(orig_lines, trans_lines):
     accumulated_trans_text = ""
 
     for i in range(orig_count):
-        # 这段原文应分到的译文字符数
+        # 这段原文应分到的译文字符数（语言感知调整）
         proportion = orig_char_counts[i] / total_orig_chars
-        target_chars = proportion * total_trans_chars
+        target_chars = proportion * total_trans_chars * length_factor
         trans_char_budget += target_chars
 
         # 消耗译文行直到达到预算
@@ -985,6 +1013,283 @@ def _split_title_and_body(lines):
     if len(lines[0]) <= 80:
         return lines[0], lines[1:]
     return "", lines
+
+
+# ═══════════════════════════════════════════════════════════
+# PPT JSON 结构化提取与导出（v2 — 消除标记丢失风险）
+# ═══════════════════════════════════════════════════════════
+
+def read_pptx_json(file_path):
+    """以 JSON 结构提取 PPT 文本，彻底消除 [幻灯片 N/M] 标记丢失风险。
+
+    核心思路：
+    - 每个文本段落分配唯一 JSON key（如 s1_t0, s1_p0, s2_tbl_r0）
+    - AI 只需翻译 JSON 的 value，key 原样保留 → 零丢失风险
+    - 导出时按 key → para_ref 精确回写，不依赖行号匹配
+
+    JSON key 规则：
+    - s{slide}_t{idx}     标题段落（title）
+    - s{slide}_p{idx}     正文段落（paragraph）
+    - s{slide}_tbl_r{row} 表格行（table row），value 为 "col1 | col2 | ..."
+
+    Returns:
+        tuple: (json_text, structure_index)
+        - json_text: JSON 字符串，用于展示给用户和发送给 AI
+        - structure_index: 列表，每个元素是 {
+              "key": str,
+              "slide_idx": int,
+              "original_text": str,
+              "is_title": bool,
+              "is_table_row": bool,
+              "char_limit": int,
+            }
+    """
+    import json
+    from pptx import Presentation
+
+    prs = Presentation(file_path)
+    total = len(prs.slides)
+    result_data = {}
+    structure_index = []
+
+    for slide_idx, slide in enumerate(prs.slides, 1):
+        orig_paras = _collect_slide_paragraphs(slide)
+
+        # 为当前 slide 内的段落分类计数
+        title_count = 0
+        body_count = 0
+        tbl_count = 0
+
+        for item in orig_paras:
+            if item.get("is_title"):
+                key = f"s{slide_idx}_t{title_count}"
+                title_count += 1
+            elif item.get("is_table_row"):
+                key = f"s{slide_idx}_tbl_r{tbl_count}"
+                tbl_count += 1
+            else:
+                key = f"s{slide_idx}_p{body_count}"
+                body_count += 1
+
+            result_data[key] = item["text"]
+            structure_index.append({
+                "key": key,
+                "slide_idx": slide_idx,
+                "original_text": item["text"],
+                "is_title": item.get("is_title", False),
+                "is_table_row": item.get("is_table_row", False),
+                "char_limit": item.get("char_limit", 500),
+            })
+
+    json_text = json.dumps(result_data, ensure_ascii=False, indent=2)
+    return json_text, structure_index
+
+
+def parse_pptx_json_response(ai_output):
+    """从 AI 的回复中提取 JSON 翻译结果。
+
+    AI 可能在 JSON 前后添加 markdown 代码块标记 (```json ... ```)，
+    此函数会自动去除这些包裹。
+
+    Returns:
+        dict: key → translated_value
+        如果解析失败返回 None
+    """
+    import json
+    import re
+
+    text = ai_output.strip()
+
+    # 尝试直接解析
+    try:
+        result = json.loads(text)
+        if isinstance(result, dict):
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 提取 markdown 代码块中的 JSON
+    code_block_re = re.compile(r'```(?:json)?\s*\n?(.*?)\n?\s*```', re.DOTALL)
+    for m in code_block_re.finditer(text):
+        try:
+            result = json.loads(m.group(1).strip())
+            if isinstance(result, dict):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # 尝试找到第一个 { 和最后一个 } 之间的内容
+    first_brace = text.find('{')
+    last_brace = text.rfind('}')
+    if first_brace >= 0 and last_brace > first_brace:
+        try:
+            result = json.loads(text[first_brace:last_brace + 1])
+            if isinstance(result, dict):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
+
+
+def export_pptx_json(original_path, translated_json_or_dict, structure_index,
+                     output_path, target_lang=None):
+    """基于 JSON key 映射导出 PPT 翻译。
+
+    核心原则：只动 <a:t> 文字节点，其他全不碰。
+    - 重新打开原始 PPT（不保留内存中的 Presentation 对象）
+    - 按页收集段落，与 structure_index 按序匹配
+    - runs[0].text = 译文, runs[1:].text = ""
+    - 超限检测 + LLM 自动压缩
+
+    Args:
+        original_path: 原始 PPT 文件路径
+        translated_json_or_dict: AI 返回的 JSON 字符串或已解析的 dict
+        structure_index: read_pptx_json() 返回的结构索引
+        output_path: 导出文件路径
+        target_lang: 目标语言（用于超限压缩）
+    """
+    import gc
+    import json
+    import logging
+    from pptx import Presentation
+
+    logger = logging.getLogger('TranslationAgent')
+
+    # 解析译文 JSON
+    if isinstance(translated_json_or_dict, dict):
+        translations = translated_json_or_dict
+    else:
+        translations = parse_pptx_json_response(translated_json_or_dict)
+
+    if translations is None:
+        raise ValueError("无法解析 AI 译文 JSON，请检查输出格式")
+
+    gc.collect()
+    prs = Presentation(original_path)
+
+    overflow_count = 0
+
+    for slide_idx, slide in enumerate(prs.slides, 1):
+        # 重新收集该 slide 的段落（与 read_pptx_json 一致的遍历顺序）
+        orig_paras = _collect_slide_paragraphs(slide)
+        if not orig_paras:
+            continue
+
+        # 取出该 slide 在 structure_index 中的条目
+        slide_entries = [e for e in structure_index if e["slide_idx"] == slide_idx]
+        if not slide_entries:
+            continue
+
+        # 逐条匹配：按 structure_index 的顺序（与 orig_paras 的顺序一致）
+        for i, entry in enumerate(slide_entries):
+            if i >= len(orig_paras):
+                break
+
+            key = entry["key"]
+            translated_text = translations.get(key, "")
+
+            # 译文为空 → 保留原文
+            if not translated_text or not translated_text.strip():
+                continue
+
+            # 超限检测 + 自动压缩（非表格行）
+            char_limit = entry.get("char_limit", 500)
+            if len(translated_text) > char_limit and not entry.get("is_table_row"):
+                overflow_count += 1
+                lang = target_lang or "English"
+                logger.info(
+                    f"幻灯片 {slide_idx} [{key}]: 译文 {len(translated_text)} 字符"
+                    f" 超出上限 {char_limit}，自动压缩"
+                )
+                translated_text = _compress_overflow(translated_text, char_limit, lang)
+
+            # 回写
+            para_info = orig_paras[i]
+            if para_info.get("is_table_row") and para_info.get("row_cells"):
+                # 表格行：按 " | " 拆分译文，写回各单元格
+                cells = translated_text.split(" | ")
+                row_paras = para_info["row_cells"]
+                for ci, cell_para in enumerate(row_paras):
+                    if cell_para and ci < len(cells):
+                        cell_text = cells[ci].strip()
+                        if cell_text:
+                            _replace_para_text(cell_para, cell_text)
+            else:
+                # 普通段落 / 标题：runs[0].text = 译文, runs[1:].text = ""
+                _replace_para_text(para_info["para"], translated_text)
+
+    if overflow_count > 0:
+        logger.info(f"共 {overflow_count} 处译文超出文本框限制，已自动压缩")
+
+    prs.save(output_path)
+
+
+def split_pptx_json_chunks(json_text, max_keys_per_chunk=80):
+    """将 PPT JSON 按幻灯片边界分块，避免跨页切断。
+
+    Args:
+        json_text: JSON 字符串
+        max_keys_per_chunk: 每块最大 key 数
+
+    Returns:
+        list of str: 分块后的 JSON 字符串列表
+    """
+    import json
+
+    try:
+        data = json.loads(json_text)
+    except (json.JSONDecodeError, ValueError):
+        return [json_text]
+
+    if not isinstance(data, dict):
+        return [json_text]
+
+    # 按 slide 分组
+    slides = {}
+    for key, value in data.items():
+        parts = key.split("_", 1)
+        slide_id = parts[0]  # "s1", "s2", ...
+        slides.setdefault(slide_id, {})[key] = value
+
+    # 分块：每块最多 max_keys_per_chunk 个 key
+    chunks = []
+    current = {}
+    current_count = 0
+
+    for slide_id in sorted(slides.keys()):
+        slide_data = slides[slide_id]
+        if current_count + len(slide_data) > max_keys_per_chunk and current:
+            # 当前块已满，输出
+            chunks.append(json.dumps(current, ensure_ascii=False, indent=2))
+            current = {}
+            current_count = 0
+        current.update(slide_data)
+        current_count += len(slide_data)
+
+    if current:
+        chunks.append(json.dumps(current, ensure_ascii=False, indent=2))
+
+    return chunks if chunks else [json_text]
+
+
+def is_pptx_json_format(text):
+    """检测文本是否为 PPT JSON 格式。
+
+    判断标准：文本是合法 JSON，且所有 key 符合 s{N}_t/p/tbl_r* 模式。
+    """
+    import json
+    import re
+
+    try:
+        data = json.loads(text.strip())
+        if not isinstance(data, dict) or len(data) == 0:
+            return False
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+    key_pattern = re.compile(r'^s\d+_(t|p|tbl_r)\d+$')
+    return all(key_pattern.match(k) for k in data.keys())
 
 
 # ═══════════════════════════════════════════════════════════

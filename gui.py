@@ -31,6 +31,7 @@ import openai
 import requests
 import re
 from bs4 import BeautifulSoup
+from file_handler import is_pptx_json_format, split_pptx_json_chunks, parse_pptx_json_response
 
 # 日志配置 — 打包后 console=False 也能写文件排查问题
 _log_dir = os.path.join(_BASE_DIR, 'logs')
@@ -707,10 +708,15 @@ def fetch_url(url):
 def split_chunks(text, max_chars=80000):
     """智能分块，兼容中文（按字符数）和英文（按空格分词）。
 
+    PPT JSON 感知：如果文本是 PPT JSON 格式，使用 slide 边界分块。
     PPT 感知：如果文本包含 [幻灯片 N/M] 标记，优先在幻灯片边界断开，
     避免在一张幻灯片内容中间被切断，导致部分页面丢失译文。
     """
     import re
+
+    # ── PPT JSON 格式优先检测 ──
+    if is_pptx_json_format(text):
+        return split_pptx_json_chunks(text)
 
     # ── PPT 幻灯片感知分块 ──
     slide_pattern = re.compile(r'^\s*\[幻灯片\s+\d+/\d+\]', re.MULTILINE)
@@ -912,14 +918,31 @@ def _has_slide_markers(text):
 
 def step3_draft(source_text, prompt, source_lang, target_lang):
     chunks = split_chunks(source_text)
-    is_ppt = _has_slide_markers(source_text)
+    is_ppt_json = is_pptx_json_format(source_text)
+    is_ppt = is_ppt_json or _has_slide_markers(source_text)
 
     subagent_cmd = """Follow all rules in the translation context above.
 Translate this chunk COMPLETELY, every sentence, no omission, no summarization.
 Keep paragraph count similar, preserve format fully. Only output pure translation result.
 """
 
-    if is_ppt:
+    if is_ppt_json:
+        # PPT JSON 模式：保留所有 key，只翻译 value
+        subagent_cmd += """
+IMPORTANT: This is a PowerPoint presentation in JSON format.
+Each key (e.g., s1_t0, s1_p0) identifies a text element's position.
+You MUST:
+1. Keep ALL keys exactly as they are — do NOT modify, rename, or omit any keys
+2. Translate ONLY the values (the text content)
+3. Return a valid JSON object with ALL original keys preserved
+4. For table rows (keys containing "tbl_r"), keep the " | " separator between cell values
+5. Output ONLY the JSON object, nothing else
+
+PPT CONDENSATION RULE:
+Condense the translated text for slides — use key phrases, remove filler words,
+FULLY preserve all original meaning and key information.
+"""
+    elif is_ppt:
         # PPT 模式：强化保留幻灯片标记的指令
         subagent_cmd += """
 IMPORTANT: This is PPT content. You MUST preserve ALL [幻灯片 N/M] markers exactly as they appear.
@@ -939,6 +962,15 @@ Do not add new ideas or omit any essential points.
     for chunk in chunks:
         t = chat(prompt + "\n" + subagent_cmd, chunk)
         results.append(t)
+    # For JSON chunks, merge the dicts back into one JSON
+    if is_ppt_json:
+        import json
+        merged = {}
+        for r in results:
+            parsed = parse_pptx_json_response(r)
+            if parsed:
+                merged.update(parsed)
+        return json.dumps(merged, ensure_ascii=False, indent=2)
     return "\n\n".join(results)
 
 
@@ -1088,6 +1120,67 @@ def _rebuild_markers_from_source(translated_text, source_text):
     return "\n".join(result_parts)
 
 
+def _make_json_critique_pairs(source_text, draft_text, max_keys=80):
+    """为 JSON 格式的 PPT 译文创建审校对照对。
+
+    按幻灯片边界分块，确保每块都是完整的 JSON 子集。
+    """
+    import json
+
+    try:
+        src_data = json.loads(source_text.strip())
+        draft_data = json.loads(draft_text.strip())
+    except (json.JSONDecodeError, ValueError):
+        return [(source_text, draft_text)]
+
+    if not isinstance(src_data, dict) or not isinstance(draft_data, dict):
+        return [(source_text, draft_text)]
+
+    # 按 slide 分组
+    src_slides = {}
+    for key, value in src_data.items():
+        slide_id = key.split("_", 1)[0]
+        src_slides.setdefault(slide_id, {})[key] = value
+
+    draft_slides = {}
+    for key, value in draft_data.items():
+        slide_id = key.split("_", 1)[0]
+        draft_slides.setdefault(slide_id, {})[key] = value
+
+    # 对齐分块
+    pairs = []
+    current_src = {}
+    current_draft = {}
+    current_count = 0
+
+    all_slide_ids = sorted(set(list(src_slides.keys()) + list(draft_slides.keys())))
+
+    for slide_id in all_slide_ids:
+        slide_src = src_slides.get(slide_id, {})
+        slide_draft = draft_slides.get(slide_id, {})
+
+        if current_count + len(slide_src) > max_keys and current_src:
+            pairs.append((
+                json.dumps(current_src, ensure_ascii=False, indent=2),
+                json.dumps(current_draft, ensure_ascii=False, indent=2),
+            ))
+            current_src = {}
+            current_draft = {}
+            current_count = 0
+
+        current_src.update(slide_src)
+        current_draft.update(slide_draft)
+        current_count += max(len(slide_src), len(slide_draft))
+
+    if current_src:
+        pairs.append((
+            json.dumps(current_src, ensure_ascii=False, indent=2),
+            json.dumps(current_draft, ensure_ascii=False, indent=2),
+        ))
+
+    return pairs if pairs else [(source_text, draft_text)]
+
+
 def step4_critique(source_text, draft, analysis, source_lang, target_lang,
                    compact_terms_hint=None):
     """审校译文 — 长文档分段审校，避免截断。PPT 感知分块。精简模式只传术语。"""
@@ -1110,11 +1203,20 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
         reference_block = f"分析要点：\n{analysis[:8000]}"
 
     is_ppt = _has_slide_markers(draft)
+    is_ppt_json = is_pptx_json_format(draft)
+    if is_ppt_json:
+        is_ppt = True  # treat JSON PPT as PPT for downstream checks
+        # JSON PPT 需要按 JSON 边界分块，不能用文本流分段
+        pairs = _make_json_critique_pairs(source_text, draft)
+        if not pairs:
+            pairs = [(source_text, draft)]
     critiques = []
     for idx, (src_part, draft_part) in enumerate(pairs):
         part_label = f"（第 {idx+1}/{len(pairs)} 段）" if len(pairs) > 1 else ""
         ppt_note = ""
-        if is_ppt:
+        if is_ppt_json:
+            ppt_note = '\n注意：这是 PPT JSON 格式内容。审校时请对比每个 key 对应的原文和译文。只评价译文质量，不要修改 JSON 结构。'
+        elif is_ppt:
             ppt_note = '\n注意：这是 PPT 幻灯片内容，包含 [幻灯片 N/M] 标记。审校时请逐页检查，确保没有遗漏任何一页的译文。\n额外检查：译文是否已按 PPT 精简原则处理？是否使用了关键词短语、去除了填充词、完整保留了所有原始含义和关键信息？是否添加了新想法或遗漏了要点？'
         critique = chat(
             "你是严格的翻译审校专家。",
@@ -1137,13 +1239,28 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
 
 def step5_final(source_text, draft, critique, target_lang):
     """终稿润色 — 长文档分段修正，避免超出上下文窗口。PPT 感知分块。"""
-    draft_chunks = _split_with_slide_awareness(draft)
-    src_chunks = _split_with_slide_awareness(source_text)
-    is_ppt = _has_slide_markers(draft)
+    is_ppt_json = is_pptx_json_format(draft)
+    is_ppt = is_ppt_json or _has_slide_markers(draft)
+
+    # JSON PPT: 按幻灯片边界分块，保持 JSON 结构完整
+    if is_ppt_json:
+        draft_chunks = split_pptx_json_chunks(draft)
+        src_chunks = split_pptx_json_chunks(source_text)
+    else:
+        draft_chunks = _split_with_slide_awareness(draft)
+        src_chunks = _split_with_slide_awareness(source_text)
 
     if len(draft_chunks) <= 1:
         ppt_instruction = ""
-        if is_ppt:
+        if is_ppt_json:
+            ppt_instruction = """
+IMPORTANT: This is a PPT translation in JSON format.
+You MUST keep ALL keys exactly as they are. Translate ONLY the values.
+Return a valid JSON object. Do NOT add explanations outside the JSON.
+
+PPT CONDENSATION: Condense for slides — key phrases, no filler, FULL meaning preserved.
+"""
+        elif is_ppt:
             ppt_instruction = """\n注意：这是 PPT 幻灯片内容。你必须保留所有 [幻灯片 N/M] 标记，确保每一页都有对应的译文，不能遗漏任何页面。
 PPT 精简要求：请按幻灯片格式精简译文——尽可能简洁，使用关键词短语，去除填充词，同时完整保留所有原始含义和关键信息。不要添加新想法，不要遗漏任何要点。
 """
@@ -1171,7 +1288,9 @@ PPT 精简要求：请按幻灯片格式精简译文——尽可能简洁，使�
         crit_part = critique_chunks[idx] if idx < len(critique_chunks) else critique_chunks[-1] if critique_chunks else ""
         src_part = src_chunks[idx] if idx < len(src_chunks) else ""
         ppt_instruction = ""
-        if is_ppt:
+        if is_ppt_json:
+            ppt_instruction = "\n注意：这是 PPT JSON 格式翻译。保留所有 key，只翻译 value。输出合法 JSON。"
+        elif is_ppt:
             ppt_instruction = "\n注意：这是 PPT 幻灯片内容的一部分。你必须保留此段中的所有 [幻灯片 N/M] 标记，确保每一页都有对应的译文。"
         src_block = f"\n原文段落：\n{src_part}\n\n" if src_part else ""
         result = chat(
@@ -1186,6 +1305,15 @@ PPT 精简要求：请按幻灯片格式精简译文——尽可能简洁，使�
         )
         final_parts.append(result)
 
+    # For JSON chunks, merge the dicts back into one JSON
+    if is_ppt_json:
+        import json
+        merged = {}
+        for r in final_parts:
+            parsed = parse_pptx_json_response(r)
+            if parsed:
+                merged.update(parsed)
+        return json.dumps(merged, ensure_ascii=False, indent=2)
     return "\n\n".join(final_parts)
 
 
@@ -1797,7 +1925,7 @@ class _ExportWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, fmt, mode, source, result, file_type, file_path, save_path,
-                 target_lang=None):
+                 target_lang=None, file_extra=None):
         super().__init__()
         self.fmt = fmt
         self.mode = mode
@@ -1807,6 +1935,7 @@ class _ExportWorker(QThread):
         self.file_path = file_path
         self.save_path = save_path  # 主线程获取的保存路径
         self.target_lang = target_lang
+        self.file_extra = file_extra
 
     def run(self):
         try:
@@ -1864,6 +1993,8 @@ class _ExportWorker(QThread):
             export_pptx_translation,
             export_pptx_bilingual,
             export_pptx_bilingual_inline,
+            export_pptx_json,
+            is_pptx_json_format,
         )
         if not self.file_path or not os.path.exists(self.file_path):
             self.error.emit(
@@ -1884,6 +2015,19 @@ class _ExportWorker(QThread):
         original_path = self.file_path
         path = self.save_path
 
+        # ── JSON 模式：使用 structure_index 进行精确的 para_ref 写回 ──
+        if (isinstance(self.source, str) and is_pptx_json_format(self.source)
+                and self.file_extra and isinstance(self.file_extra, list)):
+            try:
+                export_pptx_json(
+                    original_path, self.result, self.file_extra, path,
+                    target_lang=self.target_lang)
+                self.success.emit(f"PPT 已保存到：\n{path}")
+                return
+            except Exception as e:
+                logger.warning(f"JSON 导出失败，回退到传统模式: {e}")
+
+        # ── 传统文本流模式 ──
         # 导出前验证并修复幻灯片标记
         export_result = _validate_slide_markers(self.result, self.source)
 
@@ -3392,6 +3536,7 @@ class MainWindow(QMainWindow):
             file_type=self.file_type, file_path=self.file_path,
             save_path=save_path,
             target_lang=self.target_lang.currentText() if hasattr(self, 'target_lang') else None,
+            file_extra=self.file_extra,
         )
         self._export_worker.success.connect(self._on_export_success)
         self._export_worker.error.connect(self._on_export_error)
