@@ -1361,38 +1361,73 @@ def export_pptx_translation(original_path, translated, output_path,
                              target_lang=None):
     """全译文模式：保留格式，按页对位替换文字。
 
-    优先使用 python-pptx（准确识别文本框/表格/组合形状结构）。
-    仅在文件 >200MB 或 python-pptx 失败时回退到 zipfile 方式。
+    大文件策略（解决内存问题）：
+    ──────────────────────────────────
+    python-pptx 加载整个 PPTX 到内存，包括所有图片/媒体。
+    一个 100MB 的 PPT 可能有 90MB 是图片，加载后占用远超文件大小的内存。
+
+    方案：python-pptx 优先，但分三个级别处理：
+    1. ≤200MB → 直接 python-pptx（最准确）
+    2. >200MB → 先尝试 python-pptx（gc + 内存警告），
+       如果内存不足则回退到 zipfile + 改进的 XML 解析
+    3. zipfile 回退使用 _modify_slide_xml_v2（段落级精确匹配）
+
+    绝对保证：
+    - 不动任何格式属性（a:rPr, a:pPr, p:sp）
+    - 译文为空时保留原文（不删除内容）
+    - 不产生中英混杂（匹配失败则保留原文而非留空）
     """
-    # 兜底：确保译文中有幻灯片标记
     translated = _reconstruct_slide_markers(original_path, translated)
 
     import gc
     import os
+    import logging
 
+    logger = logging.getLogger('TranslationAgent')
     file_size_mb = os.path.getsize(original_path) / (1024 * 1024)
 
-    # 优先使用 python-pptx（准确），超大文件才用 zipfile
+    # ── 级别 1：小文件直接用 python-pptx ──
     if file_size_mb <= 200:
         try:
             _export_pptx_python_pptx(original_path, translated, output_path,
                                      target_lang=target_lang)
             return
-        except Exception:
-            pass
+        except MemoryError:
+            logger.warning(f"PPT {file_size_mb:.0f}MB 内存不足，切换到 zipfile 模式")
+        except Exception as e:
+            logger.warning(f"python-pptx 导出失败: {e}，切换到 zipfile 模式")
 
-    # 回退：zipfile 方式（不加载图片，适合超大文件）
-    try:
+    # ── 级别 2：大文件先尝试 python-pptx（充分 GC） ──
+    if file_size_mb > 200:
         gc.collect()
+
+        try:
+            gc.collect()
+            logger.info(f"PPT {file_size_mb:.0f}MB，尝试 python-pptx 加载...")
+            _export_pptx_python_pptx(original_path, translated, output_path,
+                                     target_lang=target_lang)
+            return
+        except MemoryError:
+            logger.warning(f"PPT {file_size_mb:.0f}MB 内存不足，切换到 zipfile 模式")
+        except Exception as e:
+            logger.warning(f"python-pptx 导出失败: {e}，切换到 zipfile 模式")
+
+    # ── 级别 3：zipfile 模式（不加载图片，内存友好） ──
+    gc.collect()
+    logger.info(f"使用 zipfile 模式导出 {file_size_mb:.0f}MB PPT...")
+    try:
         _export_pptx_zip(original_path, translated, output_path)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"zipfile 导出也失败: {e}")
 
-    # 最后兜底：再试 python-pptx
+    # ── 最后兜底 ──
     gc.collect()
-    _export_pptx_python_pptx(original_path, translated, output_path,
-                             target_lang=target_lang)
+    try:
+        _export_pptx_python_pptx(original_path, translated, output_path,
+                                 target_lang=target_lang)
+    except Exception as e:
+        raise Exception(f"所有导出方式均失败: {e}")
 
 
 def _export_pptx_python_pptx(original_path, translated, output_path,
