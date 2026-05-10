@@ -1054,7 +1054,7 @@ def _rebuild_markers_from_source(translated_text, source_text):
     # 按比例分配
     result_parts = []
     trans_idx = 0
-    total_in_source = max(int(m.group(2)) for m in re.finditer(r'\[幻灯片\s+\d+/(\d+)\]', source_text))
+    total_in_source = max(int(m.group(1)) for m in re.finditer(r'\[幻灯片\s+\d+/(\d+)\]', source_text))
 
     for slide_num in sorted(src_slides.keys()):
         src_count = src_slides[slide_num]
