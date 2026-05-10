@@ -899,6 +899,7 @@ Think and reason entirely in {target_lang}.
 - Keep markdown format fully preserved
 - Cultural terms add brief explanation in parentheses
 - Natural target language expression, adjust sentence structure freely
+- For PPT/slides: Text must be CONCISE to fit limited space. Restructure grammar to compress length while preserving 100% of meaning. Use shorter clauses, active voice, and compact phrasing. Avoid unnecessary filler words, redundant modifiers, and verbose constructions. Prefer " nouns over "the noun phrases". Merge related short sentences where natural.
 """
     return prompt_full
 
@@ -924,6 +925,15 @@ Keep paragraph count similar, preserve format fully. Only output pure translatio
 IMPORTANT: This is PPT content. You MUST preserve ALL [幻灯片 N/M] markers exactly as they appear.
 Do NOT omit any markers. Do NOT merge slides. Translate ONLY the text after each marker.
 Every [幻灯片 N/M] line must appear in your output. Output ALL slides, not just the first few.
+
+PPT CONCISENESS RULES:
+- PPT text has limited space. Translation must be CONCISE — ideally ≤80% of source character count.
+- Restructure grammar: use active voice, shorter clauses, compact phrasing.
+- Remove filler words ("in order to" → "to", "due to the fact that" → "because").
+- Replace verbose phrases ("a large number of" → "many", "at this point in time" → "now").
+- Drop unnecessary articles/quantifiers where meaning is clear without them.
+- Merge short related sentences into one with semicolons or em-dashes.
+- ALL meaning must be preserved — compress style, not substance.
 """
 
     if len(chunks) == 1:
@@ -1108,7 +1118,7 @@ def step4_critique(source_text, draft, analysis, source_lang, target_lang,
         part_label = f"（第 {idx+1}/{len(pairs)} 段）" if len(pairs) > 1 else ""
         ppt_note = ""
         if is_ppt:
-            ppt_note = "\n注意：这是 PPT 幻灯片内容，包含 [幻灯片 N/M] 标记。审校时请逐页检查，确保没有遗漏任何一页的译文。"
+            ppt_note = '\n注意：这是 PPT 幻灯片内容，包含 [幻灯片 N/M] 标记。审校时请逐页检查，确保没有遗漏任何一页的译文。\n额外检查：PPT 译文是否足够精简？是否仍有冗余词组（如「为了...的目的」→「为」、「在...的情况下」→「...时」）？英文是否使用了主动语态和紧凑从句？在不丢失任何语义的前提下，译文是否已压缩到最短？'
         critique = chat(
             "你是严格的翻译审校专家。",
             f"""审校{source_lang}→{target_lang}译文{part_label}，输出诊断报告：
@@ -1137,7 +1147,14 @@ def step5_final(source_text, draft, critique, target_lang):
     if len(draft_chunks) <= 1:
         ppt_instruction = ""
         if is_ppt:
-            ppt_instruction = "\n注意：这是 PPT 幻灯片内容。你必须保留所有 [幻灯片 N/M] 标记，确保每一页都有对应的译文，不能遗漏任何页面。"
+            ppt_instruction = """\n注意：这是 PPT 幻灯片内容。你必须保留所有 [幻灯片 N/M] 标记，确保每一页都有对应的译文，不能遗漏任何页面。
+PPT 精简要求：
+- 译文必须精炼，目标不超过原文 80% 字符数
+- 删除一切冗余：填充词、重复修饰、多余冠词/量词
+- 用主动语态替代被动语态
+- 长句拆短句、短句可合并
+- 在 100% 保留语义的前提下，追求最紧凑的表达
+"""
         return chat(
             f"你是{target_lang}母语精修专家，严格依据审校报告逐条修正",
             f"""逐条修正术语、表达、不通顺、翻译腔；保持原意不变。
