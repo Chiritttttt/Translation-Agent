@@ -163,12 +163,52 @@ def _ocr_with_vision(file_path, page_count):
         return ""
 
 
+def _walk_docx_elements(doc):
+    """遍历 Word 文档中的所有文本段落（包括表格单元格），按文档顺序返回。
+
+    python-docx 的 doc.paragraphs 只包含正文段落，不包含表格单元格中的段落。
+    此函数遍历 doc.element.body 的直接子元素，按出现顺序 yield 段落：
+    - <w:p> → 正文段落（yield Paragraph 对象）
+    - <w:tbl> → 表格，逐行逐单元格 yield cell.paragraphs
+
+    合并单元格处理：用 id(_tc) 去重，避免同一个单元格被处理多次。
+
+    Yields:
+        Paragraph: python-docx Paragraph 对象
+    """
+    from docx.text.paragraph import Paragraph
+    from docx.table import Table
+
+    body = doc.element.body
+    for child in body:
+        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+
+        if tag == 'p':
+            yield Paragraph(child, doc)
+
+        elif tag == 'tbl':
+            table = Table(child, doc)
+            seen_cells = set()  # 去重合并单元格
+            for row in table.rows:
+                for cell in row.cells:
+                    cell_id = id(cell._tc)
+                    if cell_id in seen_cells:
+                        continue
+                    seen_cells.add(cell_id)
+                    for para in cell.paragraphs:
+                        yield para
+
+
 def read_docx(file_path):
     try:
         from docx import Document
         doc = Document(file_path)
-        text = "\n".join([para.text for para in doc.paragraphs])
-        return text.strip()
+        lines = []
+        for para in _walk_docx_elements(doc):
+            text = para.text.strip()
+            if text:
+                lines.append(text)
+        return "\n".join(lines).strip()
     except Exception as e:
         raise Exception(f"DOCX读取失败: {e}")
 
@@ -477,10 +517,16 @@ def export_docx_translation(translated, output_path, original_path=None):
     if original_path and os.path.exists(original_path):
         src_doc = Document(original_path)
         dst_doc = Document(original_path)
-        orig_paras = [p for p in src_doc.paragraphs if p.text.strip()]
-        matched = match_translation([p.text for p in orig_paras], translated)
+        # 收集原文所有文本元素（含表格单元格），保持文档顺序
+        orig_texts = []
+        for para in _walk_docx_elements(src_doc):
+            text = para.text.strip()
+            if text:
+                orig_texts.append(text)
+        matched = match_translation(orig_texts, translated)
+        # 按相同顺序回写译文到目标文档
         trans_idx = 0
-        for para in dst_doc.paragraphs:
+        for para in _walk_docx_elements(dst_doc):
             if para.text.strip() and trans_idx < len(matched):
                 new_text = matched[trans_idx]
                 trans_idx += 1
